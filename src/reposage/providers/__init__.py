@@ -10,9 +10,26 @@ message that says what to install.
 from __future__ import annotations
 
 from ..config import ANTHROPIC, DEEPSEEK
-from .base import Message, Provider, ProviderReply, TokenUsage
+from .base import (
+    Message,
+    Provider,
+    ProviderContractError,
+    ProviderReply,
+    TokenUsage,
+    ToolCall,
+    ToolResult,
+)
 
-__all__ = ["Message", "Provider", "ProviderReply", "TokenUsage", "build_provider"]
+__all__ = [
+    "Message",
+    "Provider",
+    "ProviderContractError",
+    "ProviderReply",
+    "TokenUsage",
+    "ToolCall",
+    "ToolResult",
+    "build_provider",
+]
 
 
 def build_provider(name: str, api_key: str, timeout_s: float) -> Provider:

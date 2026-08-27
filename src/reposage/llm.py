@@ -26,13 +26,14 @@ the eval harness -- is written once and runs against either.
 
 from __future__ import annotations
 
+import json
 import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Sequence
 
 from .config import Settings, estimate_cost, format_usd, provider_for
-from .providers import Message, Provider, TokenUsage, build_provider
+from .providers import Message, Provider, TokenUsage, ToolCall, build_provider
 
 
 class BudgetExceeded(RuntimeError):
@@ -81,11 +82,21 @@ class LLMResponse:
     output_tokens: int
     cost_usd: float
     stop_reason: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
     raw: Any = field(default=None, repr=False)
 
     @property
     def truncated(self) -> bool:
         return self.stop_reason == "max_tokens"
+
+    @property
+    def wants_tools(self) -> bool:
+        """The model asked for tools and is waiting for their results.
+
+        Phase 2 acts on this once, by hand. Phase 3 turns it into the loop
+        condition.
+        """
+        return bool(self.tool_calls)
 
 
 class LLMClient:
@@ -116,18 +127,33 @@ class LLMClient:
     def remaining_budget_usd(self) -> float:
         return max(0.0, self.settings.spend_ceiling_usd - self.usage.cost_usd)
 
-    def _estimate_input_tokens(self, messages: Sequence[Message], system: str | None) -> int:
+    def _estimate_input_tokens(
+        self,
+        messages: Sequence[Message],
+        system: str | None,
+        tools: Sequence[dict[str, Any]] | None = None,
+    ) -> int:
         """Cheap pre-flight estimate: roughly four characters per token.
 
         Exact token-counting endpoints exist, but they cost a round trip per
         call. For a guard whose job is "stop a runaway loop", a rough
         over-estimate is the right trade: it errs toward stopping early, and
         the exact figure arrives with the response anyway.
+
+        Tool schemas are counted, and they are not a rounding error. They are
+        injected into the model's context on *every* call, so three tools with
+        thorough descriptions can be a larger fixed cost than the user's
+        question. A budget guard that ignores them under-estimates every
+        tool-enabled request.
         """
         chars = len(system or "")
         for message in messages:
-            content = message.get("content", "")
+            content = message.get("content") or ""
             chars += len(content) if isinstance(content, str) else len(str(content))
+            for call in message.get("tool_calls", []):
+                chars += len(call.name) + len(json.dumps(call.arguments))
+        for tool in tools or []:
+            chars += len(json.dumps(tool))
         return chars // 4
 
     def _guard_budget(
@@ -136,10 +162,11 @@ class LLMClient:
         messages: Sequence[Message],
         system: str | None,
         max_tokens: int,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         projected = estimate_cost(
             model,
-            self._estimate_input_tokens(messages, system),
+            self._estimate_input_tokens(messages, system, tools),
             # Worst case: assume the model uses every output token we allowed,
             # and assume none of the prompt hits a cache. We cannot know either
             # until we have already paid for the call.
@@ -186,14 +213,19 @@ class LLMClient:
                 if attempt == self.settings.max_retries:
                     break
                 delay = (2 ** attempt) + random.uniform(0, 0.5)
+                # The reason is printed, not just the type. Some retryable
+                # failures are provider defects rather than transport hiccups,
+                # and a silent retry of those would hide exactly what you need
+                # to see.
                 print(
-                    f"  [retry] {description} failed ({type(exc).__name__}); "
-                    f"retrying in {delay:.1f}s "
+                    f"  [retry] {description} failed ({type(exc).__name__}: "
+                    f"{str(exc)[:160]}); retrying in {delay:.1f}s "
                     f"({attempt + 1}/{self.settings.max_retries})"
                 )
                 time.sleep(delay)
         raise RuntimeError(
-            f"{description} failed after {self.settings.max_retries} retries"
+            f"{description} failed after {self.settings.max_retries} retries "
+            f"({type(last_error).__name__}: {last_error})"
         ) from last_error
 
     # -- public API --------------------------------------------------------
@@ -215,6 +247,7 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        tools: Sequence[dict[str, Any]] | None = None,
         stop_sequences: Sequence[str] | None = None,
     ) -> LLMResponse:
         """Send one request and return the text plus its accounting.
@@ -230,7 +263,7 @@ class LLMClient:
         temperature = self.settings.temperature if temperature is None else temperature
         payload = self._as_messages(prompt, messages)
 
-        self._guard_budget(model, payload, system, max_tokens)
+        self._guard_budget(model, payload, system, max_tokens, tools)
 
         reply = self._with_retries(
             lambda: self._provider.complete(
@@ -239,6 +272,7 @@ class LLMClient:
                 system=system,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                tools=tools,
                 stop_sequences=stop_sequences,
             ),
             f"{self._provider.name}.complete",
@@ -255,6 +289,7 @@ class LLMClient:
             output_tokens=reply.usage.output_tokens,
             cost_usd=cost,
             stop_reason=reply.stop_reason,
+            tool_calls=reply.tool_calls,
             raw=reply.raw,
         )
 

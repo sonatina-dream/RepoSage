@@ -56,8 +56,8 @@ answers anyway, slightly worse, with no error to tell you why.
 |------:|----------------|--------|
 | 0 | API fundamentals: messages, tokens, cost, temperature, streaming, statelessness | Done |
 | 1 | Structured output: JSON schema, Pydantic validation, retry on validation error | Done |
-| 2 | Tool calling: schemas, the tool-call → execute → result round trip, a registry | Next |
-| 3 | Agent harness from scratch: the loop, iteration cap, context budget, tool errors, tracing | Planned |
+| 2 | Tool calling: schemas, the tool-call → execute → result round trip, a registry | Done |
+| 3 | Agent harness from scratch: the loop, iteration cap, context budget, tool errors, tracing | Next |
 | 4 | RAG: structure-aware chunking, embeddings, hybrid retrieval, reranking, citations | Planned |
 | 5 | Evaluation: ground-truth set from closed issues, retrieval and groundedness metrics, CI gate | Planned |
 | 6 | Production: FastAPI + SSE, Docker, tracing, per-request cost, injection guardrail, UI | Planned |
@@ -77,11 +77,14 @@ pip install -r requirements.txt
 cp .env.example .env               # add DEEPSEEK_API_KEY (or ANTHROPIC_API_KEY)
 
 python scripts/check_provider.py   # ~$0.00001 — run this first
-pytest -q                          # 16 tests, no API key needed
+pytest -q                          # 50 tests, no API key needed
 
 python phases/phase00_first_call.py --all
 python phases/phase01_structured_output.py --repo fastapi/fastapi --limit 5
+python phases/phase02_tool_calling.py --show-schemas
 ```
+
+`phase02` shallow-clones the target repository into `data/repos/` on first run.
 
 If `python3` is missing or older than 3.11, install it with
 [Homebrew](https://brew.sh): `brew install python@3.12`.
@@ -97,9 +100,14 @@ src/reposage/llm.py                   accounting, spend ceiling, retries — ven
 src/reposage/providers/base.py        the contract, and what actually differs between vendors
 src/reposage/providers/*_provider.py  one wire-format translator each
 src/reposage/extraction.py            Pydantic schemas + validated extraction with retry
+src/reposage/tools/registry.py        schema-from-handler, dispatch, errors-as-results
+src/reposage/tools/repo_tools.py      get_file, search_code — path-confined, line-numbered
+src/reposage/tools/github_tools.py    list_issues
+src/reposage/repo.py                  the shallow clone the code tools read
 phases/phase00_*.py                   five runnable demos of the API fundamentals
 phases/phase01_*.py                   mines closed GitHub issues into validated records
-tests/                                16 deterministic tests, scripted fakes, no API key
+phases/phase02_*.py                   one tool-calling round trip, every message printed
+tests/                                50 deterministic tests, scripted fakes, no API key
 data/issues/                          extracted eval candidates (regenerable, gitignored)
 ```
 
@@ -166,6 +174,45 @@ than repairs.
 **Cost maths takes a timestamp rather than reading the clock.** A function that
 calls `now()` internally cannot be asserted against, and this one decides what
 you are billed.
+
+**Tool errors are results, not exceptions.** A tool that fails returns its
+failure to the model flagged `is_error`, and the model tries something else. If
+a bad path raised instead, the run would die on the model's first typo. This is
+the same shape as phase 1's validation-error retry, and it is what makes an
+agent an agent rather than a script.
+
+**The tool schema is generated from the handler's own Pydantic model.** Two
+sources of truth would drift, and the drift surfaces at runtime inside the agent
+loop, on an iteration you cannot reproduce.
+
+**Tool descriptions are prompt engineering, not documentation.** They are the
+only thing the model reads when choosing a tool, and they are re-sent on every
+single call — about 720 tokens for these three. Tool-selection accuracy is a
+phase 5 metric; a vague description is the usual reason it is bad.
+
+**Tool results have a hard output budget, and truncation is visible.** A result
+is not paid for once: it joins the history and is resent every subsequent turn.
+Told it is seeing 20 of 143 matches, the model narrows its search; left to
+assume it saw everything, it answers confidently from a fifth of the evidence.
+
+**Paths are confined to the clone, inside the tool.** The path comes from a
+model that will, from phase 4, have been reading repository text — issues, code
+comments — any of which can carry instructions aimed at it. Resolution happens
+before the containment check so that `..` and symlinks are both caught.
+
+**`search_code` is regex, not semantic — deliberately.** Phase 4 adds semantic
+retrieval as a *second* tool rather than a replacement, so the agent chooses and
+phase 5 can measure whether embeddings actually beat grep. Plenty of RAG systems
+would have been better off as ripgrep and nobody checked.
+
+**A provider that breaks its own protocol raises a distinct error.** DeepSeek
+intermittently serialises a tool call into the message content and reports the
+finish reason as `stop`. The check that catches it is deliberately strict — it
+requires the *entire* message to be a JSON object naming an offered tool —
+because a loose "does the text mention a tool name?" test would misfire
+constantly on a system whose whole job is discussing source code. It is retried
+automatically, and every attempt prints why: recover automatically, never
+silently.
 
 **Retrieval will be a tool, not a pipeline.** In phase 4 the agent decides when
 to search, rather than every question being forced through a fixed retrieve →

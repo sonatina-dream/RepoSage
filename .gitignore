@@ -22,3 +22,6 @@ data/issues/*.json
 
 # Other tooling
 .opencode/
+
+# Local clones the code tools read from — regenerable with one git clone.
+data/repos/
