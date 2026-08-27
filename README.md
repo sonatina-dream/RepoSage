@@ -65,16 +65,26 @@ answers anyway, slightly worse, with no error to tell you why.
 
 ## Quick start
 
+Needs Python 3.11+. On macOS the interpreter is `python3`, not `python` —
+`python`, `pip` and `pytest` only appear on your PATH once the venv is active.
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python3 --version                  # 3.11 or newer
+python3 -m venv .venv
+source .venv/bin/activate          # from here, `python` means the venv's
+
 pip install -r requirements.txt
-cp .env.example .env        # add DEEPSEEK_API_KEY (or ANTHROPIC_API_KEY)
+cp .env.example .env               # add DEEPSEEK_API_KEY (or ANTHROPIC_API_KEY)
+
+python scripts/check_provider.py   # ~$0.00001 — run this first
+pytest -q                          # 16 tests, no API key needed
 
 python phases/phase00_first_call.py --all
 python phases/phase01_structured_output.py --repo fastapi/fastapi --limit 5
-
-pytest                      # 16 tests, no API key needed
 ```
+
+If `python3` is missing or older than 3.11, install it with
+[Homebrew](https://brew.sh): `brew install python@3.12`.
 
 Both phase scripts take `--provider` if you want to run one against the other
 vendor without editing `.env`.
