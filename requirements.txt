@@ -1,4 +1,8 @@
+# Provider SDKs. You only need the one you use — the provider layer imports
+# lazily, so a missing SDK is an error only if you select that provider.
+openai>=1.40          # DeepSeek is served through an OpenAI-compatible endpoint
 anthropic>=0.40
+
 pydantic>=2.7
 python-dotenv>=1.0
 httpx>=0.27

@@ -5,7 +5,7 @@ Run one demo at a time:
     python phases/phase00_first_call.py --demo 3
     python phases/phase00_first_call.py --all
 
-Total cost of --all on Haiku is a fraction of a cent. Every demo prints what it
+Total cost of --all on either provider's fast model is a fraction of a cent. Every demo prints what it
 spent, because the habit of looking at that number is half of cost discipline.
 """
 
@@ -20,8 +20,8 @@ from pathlib import Path
 # would also work; this keeps the scripts runnable straight from a clone.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from reposage.config import HAIKU, Settings, format_usd  # noqa: E402
-from reposage.llm import LLMClient  # noqa: E402
+from reposage.config import Settings, format_usd  # noqa: E402
+from reposage.llm import LLMClient, describe_target  # noqa: E402
 
 
 def banner(title: str) -> None:
@@ -197,15 +197,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--demo", type=int, choices=sorted(DEMOS), help="Run a single demo.")
     parser.add_argument("--all", action="store_true", help="Run all five.")
-    parser.add_argument("--model", default=HAIKU)
+    parser.add_argument("--provider", help="anthropic or deepseek; defaults to REPOSAGE_PROVIDER.")
+    parser.add_argument("--model", help="Defaults to the provider's fast model.")
     args = parser.parse_args()
 
     if not args.demo and not args.all:
         parser.error("Pass --demo N or --all.")
 
-    settings = Settings.from_env()
-    settings.model = args.model
+    settings = Settings.from_env(provider=args.provider, model=args.model)
     client = LLMClient(settings)
+    print(describe_target(settings))
 
     for number in sorted(DEMOS) if args.all else [args.demo]:
         DEMOS[number](client)

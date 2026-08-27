@@ -27,9 +27,9 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from reposage.config import SONNET, Settings, format_usd  # noqa: E402
+from reposage.config import Settings, format_usd  # noqa: E402
 from reposage.extraction import ExtractionError, IssueSummary, extract  # noqa: E402
-from reposage.llm import BudgetExceeded, LLMClient  # noqa: E402
+from reposage.llm import BudgetExceeded, LLMClient, describe_target  # noqa: E402
 
 GITHUB_API = "https://api.github.com"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data" / "issues"
@@ -102,17 +102,19 @@ def render_thread(issue: dict, max_chars: int = 6000) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default="fastapi/fastapi")
+    parser.add_argument("--provider", help="anthropic or deepseek; defaults to REPOSAGE_PROVIDER.")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument(
         "--model",
-        default=SONNET,
-        help="Extraction quality is the point here, so this defaults to Sonnet, "
-             "not the usual Haiku.",
+        default=None,
+        help="Defaults to the provider's quality model — extraction quality is "
+             "the point here, so this is not the usual fast tier.",
     )
     args = parser.parse_args()
 
-    settings = Settings.from_env()
+    settings = Settings.from_env(provider=args.provider)
     client = LLMClient(settings)
+    print(describe_target(settings))
 
     print(f"Fetching up to {args.limit} closed issues from {args.repo} ...")
     issues = fetch_closed_issues(args.repo, args.limit)
@@ -127,7 +129,10 @@ def main() -> None:
 
         try:
             summary: IssueSummary = extract(
-                client, IssueSummary, render_thread(issue), model=args.model
+                client,
+                IssueSummary,
+                render_thread(issue),
+                model=args.model or client.quality_model,
             )
         except ExtractionError as exc:
             # A failure here is data, not a crash. Some threads genuinely do

@@ -53,8 +53,6 @@ from typing import Any, Type, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .config import SONNET
-
 T = TypeVar("T", bound=BaseModel)
 
 # Structured extraction is always temperature 0. Sampling variety is a feature
@@ -231,7 +229,7 @@ def extract(
     model_cls: Type[T],
     source_text: str,
     *,
-    model: str = SONNET,
+    model: str | None = None,
     max_attempts: int = MAX_ATTEMPTS,
     max_tokens: int = 1500,
 ) -> T:
@@ -241,8 +239,16 @@ def extract(
     `.text` -- our LLMClient in production, a fake in the tests. Keeping the
     dependency this loose is what makes the retry behaviour testable without an
     API key, which matters because retry logic is exactly the code you cannot
-    afford to leave untested.
+    afford to leave untested. It also means this module knows nothing about
+    which vendor is serving the request, which is the point of providers/.
+
+    With `model=None` this asks the client for its quality model rather than
+    its default. Extraction from messy real text is one of the few places in
+    this project where the reasoning itself is the deliverable, so it is worth
+    the more expensive tier.
     """
+    if model is None:
+        model = getattr(client, "quality_model", None)
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": build_prompt(model_cls, source_text)}
     ]
