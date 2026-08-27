@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets — never commit the real key
+.env
+
+# Generated data. The extracted issue summaries are regenerable from the
+# GitHub API, and they will become the seed of the phase 5 eval set. Once
+# that eval set is curated by hand it WILL be committed (an eval set you
+# can't diff is an eval set you can't trust), but the raw dumps stay out.
+data/issues/*.json
+!data/issues/.gitkeep
+
+.DS_Store

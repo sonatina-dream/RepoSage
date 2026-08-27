@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reposage"
+version = "0.2.0"
+description = "A grounded question-answering agent for a real code repository."
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Lets the tests import `reposage` without an editable install. Deliberate:
+# `pytest` with no setup step is one less thing between a reader of this repo
+# and a green test run.
+pythonpath = ["src"]
+testpaths = ["tests"]
