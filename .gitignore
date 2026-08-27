@@ -19,3 +19,6 @@ data/issues/*.json
 !data/issues/.gitkeep
 
 .DS_Store
+
+# Other tooling
+.opencode/
