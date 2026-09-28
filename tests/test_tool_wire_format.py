@@ -158,3 +158,49 @@ def test_contract_check_raises_on_tool_calls_finish_with_no_calls():
 def test_contract_check_passes_a_normal_reply():
     DeepSeekProvider._check_contract("Routing works like this...", [], "stop", TOOL_SPEC)
     DeepSeekProvider._check_contract("", [CALL], "tool_calls", TOOL_SPEC)
+
+
+# -- thinking mode --------------------------------------------------------
+
+class _Sent(Exception):
+    """Raised by the fake transport once the request has been captured."""
+
+
+class _CapturingCompletions:
+    def __init__(self) -> None:
+        self.kwargs: dict = {}
+
+    def create(self, **kwargs):
+        self.kwargs = kwargs
+        raise _Sent
+
+
+def _provider_with_capture() -> tuple[DeepSeekProvider, _CapturingCompletions]:
+    provider = DeepSeekProvider(api_key="unused", timeout_s=1.0)
+    completions = _CapturingCompletions()
+    provider._client = type("Client", (), {"chat": type("Chat", (), {"completions": completions})})()
+    return provider, completions
+
+
+@pytest.mark.parametrize("call", ["complete", "stream"])
+def test_deepseek_requests_disable_thinking(call):
+    """V4 thinks by default and bills the reasoning against max_tokens.
+
+    Left on, a small max_tokens is spent entirely on hidden reasoning and the
+    reply comes back empty with finish reason "length".
+    """
+    provider, completions = _provider_with_capture()
+    request = dict(
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "hi"}],
+        system=None,
+        max_tokens=10,
+        temperature=0.0,
+    )
+    with pytest.raises(_Sent):
+        if call == "complete":
+            provider.complete(**request)
+        else:
+            next(provider.stream(**request))
+
+    assert completions.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}

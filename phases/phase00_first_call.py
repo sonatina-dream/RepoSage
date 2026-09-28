@@ -30,13 +30,15 @@ def banner(title: str) -> None:
 
 # --------------------------------------------------------------------------
 def demo_1_first_call(client: LLMClient) -> None:
-    """Messages: the request is a list of turns, the reply is a list of blocks.
+    """Messages: the request is a list of turns; the reply shape is per vendor.
 
-    Two things to notice in the output. The system prompt is a separate
-    parameter, not a message -- it is instruction, not conversation. And the
-    reply's `content` is a *list of blocks*, not a string: today they are all
-    text blocks, but in phase 2 the same list starts carrying `tool_use` blocks
-    alongside the text, and code that assumed `content[0].text` breaks.
+    Two things to notice in the output. The system prompt is instruction, not
+    conversation -- a separate parameter on Anthropic, the first message on
+    OpenAI-style APIs. And the raw reply body differs by vendor: Anthropic
+    returns a *list of blocks*, DeepSeek a single string. Today both carry only
+    text, but in phase 2 tool calls arrive alongside it (as `tool_use` blocks,
+    or in a sibling `tool_calls` field), and code that assumed the reply was
+    just text breaks. `response.text` is the provider layer absorbing that.
     """
     banner("Demo 1 - the shape of a call")
 
@@ -48,7 +50,12 @@ def demo_1_first_call(client: LLMClient) -> None:
 
     print(response.text)
     print(f"\nstop_reason: {response.stop_reason}")
-    print(f"content blocks: {[block.type for block in response.raw.content]}")
+
+    blocks = getattr(response.raw, "content", None)
+    if isinstance(blocks, list):
+        print(f"raw reply body: content blocks {[block.type for block in blocks]}")
+    else:
+        print("raw reply body: one string, at choices[0].message.content")
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +150,9 @@ def demo_4_streaming(client: LLMClient) -> None:
         print(chunk, end="", flush=True)
 
     total = time.monotonic() - started
+    if first_chunk_at is None:
+        print(f"no text arrived; the stream ended after {total:.2f}s")
+        return
     print(
         f"\n\nfirst token after {first_chunk_at:.2f}s, "
         f"full reply after {total:.2f}s"
