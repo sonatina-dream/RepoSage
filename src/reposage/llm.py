@@ -201,7 +201,7 @@ class LLMClient:
 
         The jitter is not decoration. Without it, every worker that hit the
         same rate limit retries at the same instant and re-creates the burst
-        that caused it -- exactly the traffic shape phase 6 produces when
+        that caused it -- exactly the traffic shape phase 8 produces when
         several requests stream at once.
         """
         last_error: Exception | None = None
@@ -316,7 +316,7 @@ class LLMClient:
 
         Retries are deliberately absent. A stream that fails halfway has
         already delivered text to the caller; resending it would duplicate
-        output rather than repair it. Phase 6 handles mid-stream failure at
+        output rather than repair it. Phase 8 handles mid-stream failure at
         the transport layer, where the client can be told to discard.
         """
         model = model or self.settings.model

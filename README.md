@@ -11,11 +11,11 @@ Default target: [`fastapi/fastapi`](https://github.com/fastapi/fastapi).
 
 ## Why it is built this way
 
-Phases 2 to 4 use no agent framework. The tool-calling round trip, the agent
-loop, the context budget and the retrieval layer are all written by hand,
-because the goal is to understand the machinery rather than to configure it. A
-LangGraph port lands on a separate branch afterwards, so the same system exists
-both ways and the trade-off is visible instead of asserted.
+Phases 2 to 5 use no agent framework. The tool-calling round trip, the agent
+loop, context management and the retrieval layer are all written by hand,
+because the goal is to understand the machinery rather than to configure it.
+Phase 6 then rebuilds the agent in LangGraph and runs both versions against the
+same eval suite, so the trade-off is measured instead of asserted.
 
 ## Providers
 
@@ -57,11 +57,14 @@ answers anyway, slightly worse, with no error to tell you why.
 | 0 | API fundamentals: messages, tokens, cost, temperature, streaming, statelessness | Done |
 | 1 | Structured output: JSON schema, Pydantic validation, retry on validation error | Done |
 | 2 | Tool calling: schemas, the tool-call → execute → result round trip, a registry | Done |
-| 3 | Agent harness from scratch: the loop, iteration cap, context budget, tool errors, tracing | Next |
+| 3 | Agent harness, the core loop: stop conditions, iteration cap, tool errors, tracing, streaming events, human approval of risky actions, and a 10-question smoke eval | Next |
+| 3b | Context engineering and memory: token budget, compacting long histories, short- vs long-term memory, subagents | Planned |
 | 4 | RAG: structure-aware chunking, embeddings, hybrid retrieval, reranking, citations | Planned |
-| 5 | Evaluation: ground-truth set from closed issues, retrieval and groundedness metrics, CI gate | Planned |
-| 6 | Production: FastAPI + SSE, Docker, tracing, per-request cost, injection guardrail, UI | Planned |
-| 7 | Write-up: architecture, measured results, decisions and trade-offs | Planned |
+| 5 | Evaluation: ground-truth set from closed issues, retrieval and groundedness metrics, LLM-as-judge, CI gate | Planned |
+| 6 | LangGraph: state graphs, tool nodes, checkpointers, interrupts, multi-agent patterns; hand-written vs framework on the same evals | Planned |
+| 7 | MCP: expose the repo tools as a Model Context Protocol server, use them from Claude Code / Desktop | Planned |
+| 8 | Production: FastAPI + SSE, Docker, tracing, per-request cost, injection guardrail, UI | Planned |
+| 9 | Write-up: architecture, measured results, decisions and trade-offs | Planned |
 
 ## Quick start
 

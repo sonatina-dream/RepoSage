@@ -125,7 +125,7 @@ def demo_4_streaming(client: LLMClient) -> None:
     Streaming does not make generation faster. It makes the *first* token
     visible immediately instead of after the whole reply is generated, which is
     the difference between a UI that feels broken and one that does not. The
-    catch, and it matters for phase 6: usage totals only arrive at the end of
+    catch, and it matters for phase 8: usage totals only arrive at the end of
     the stream, so per-request cost accounting has to happen after the last
     chunk, not alongside it.
     """
