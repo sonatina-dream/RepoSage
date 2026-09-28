@@ -1,11 +1,4 @@
-"""Provider construction. Imports are lazy on purpose.
-
-Each vendor's SDK is a real dependency with real install weight. Importing
-both at module load would mean a DeepSeek-only user cannot start the project
-without also installing Anthropic's SDK, and vice versa. So the import happens
-inside the branch that needs it, and the ImportError is translated into a
-message that says what to install.
-"""
+"""Builds the provider for a vendor; SDKs are imported only when that vendor is chosen."""
 
 from __future__ import annotations
 
@@ -33,6 +26,7 @@ __all__ = [
 
 
 def build_provider(name: str, api_key: str, timeout_s: float) -> Provider:
+    """Create the provider for `name`, importing its SDK only now."""
     if name == ANTHROPIC:
         try:
             from .anthropic_provider import AnthropicProvider

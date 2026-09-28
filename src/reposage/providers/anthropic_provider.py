@@ -25,11 +25,11 @@ _STOP_REASONS = {
 
 
 class AnthropicProvider:
+    """Talks to Claude models through Anthropic's SDK."""
+
     name = "anthropic"
 
-    # "The request never got a fair hearing" -- worth resending unchanged. A
-    # 400 for a malformed request or a 401 for a bad key will fail identically
-    # however often you retry, so they are absent here.
+    # Only failures worth resending unchanged; a 400 or 401 would fail the same way again.
     retryable_errors = (
         anthropic.RateLimitError,
         anthropic.APIConnectionError,
@@ -37,6 +37,7 @@ class AnthropicProvider:
     )
 
     def __init__(self, api_key: str, timeout_s: float) -> None:
+        """Create the SDK client with its own retries turned off."""
         self._client = anthropic.Anthropic(
             api_key=api_key,
             timeout=timeout_s,
@@ -47,7 +48,7 @@ class AnthropicProvider:
 
     @staticmethod
     def _tools(tools: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Our tool spec is already Anthropic's shape, near enough."""
+        """Convert RepoSage tool specs to Anthropic's format (almost identical)."""
         return [
             {
                 "name": tool["name"],
@@ -59,47 +60,29 @@ class AnthropicProvider:
 
     @staticmethod
     def _to_wire(messages: Sequence[Message]) -> list[Message]:
-        """Serialise neutral history into Anthropic's message list.
+        """Convert RepoSage's message history into Anthropic's message list.
 
-        Two rules here are not obvious and both produce API errors when broken:
-
-        1. Tool results are `tool_result` blocks inside a **user** message.
-           Several results can share one message -- and they *must*, because
-           the API requires alternating roles. Emitting one user message per
-           result gives you consecutive user turns and a 400. Hence the
-           batching loop below.
-
-        2. An assistant turn's text and its tool_use blocks live in the same
-           `content` list. An empty text block is rejected, so it is omitted
-           rather than sent blank -- which happens routinely, since a model
-           calling a tool often says nothing at all first.
+        Tool results become tool_result blocks in a user message; empty assistant text is left out.
         """
         wire: list[Message] = []
-        index = 0
+        previous_role = None
 
-        while index < len(messages):
-            message = messages[index]
+        for message in messages:
             role = message["role"]
 
             if role == "tool":
-                # Collect this result and every consecutive one into a single
-                # user turn.
-                blocks: list[dict[str, Any]] = []
-                while index < len(messages) and messages[index]["role"] == "tool":
-                    result = messages[index]
-                    blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": result["tool_call_id"],
-                            "content": result["content"],
-                            "is_error": bool(result.get("is_error")),
-                        }
-                    )
-                    index += 1
-                wire.append({"role": "user", "content": blocks})
-                continue
-
-            if role == "assistant":
+                block = {
+                    "type": "tool_result",
+                    "tool_use_id": message["tool_call_id"],
+                    "content": message["content"],
+                    "is_error": bool(message.get("is_error")),
+                }
+                # Consecutive results share one user turn; separate turns would be a 400.
+                if previous_role == "tool":
+                    wire[-1]["content"].append(block)
+                else:
+                    wire.append({"role": "user", "content": [block]})
+            elif role == "assistant":
                 content: list[dict[str, Any]] = []
                 if message.get("content"):
                     content.append({"type": "text", "text": message["content"]})
@@ -116,9 +99,15 @@ class AnthropicProvider:
             else:
                 wire.append({"role": "user", "content": message["content"]})
 
-            index += 1
+            previous_role = role
 
         return wire
+
+    @staticmethod
+    def _usage(usage: Any) -> TokenUsage:
+        """Convert Anthropic's usage object into TokenUsage."""
+        # Prompt caching is not enabled yet, so there is no cached split to report.
+        return TokenUsage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
 
     def _kwargs(
         self,
@@ -128,15 +117,14 @@ class AnthropicProvider:
         max_tokens: int,
         temperature: float,
     ) -> dict[str, Any]:
+        """Build the request fields shared by complete() and stream()."""
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": self._to_wire(messages),
         }
-        # Top-level parameter, not a message with role="system". This is the
-        # difference that makes the DeepSeek provider's equivalent look
-        # different.
+        # Anthropic takes the system prompt as a top-level parameter, not a message.
         if system:
             kwargs["system"] = system
         return kwargs
@@ -152,20 +140,15 @@ class AnthropicProvider:
         max_tokens: int,
         temperature: float,
         tools: Sequence[dict[str, Any]] | None = None,
-        stop_sequences: Sequence[str] | None = None,
     ) -> ProviderReply:
+        """Send one request and return the reply's text, tool calls and usage."""
         kwargs = self._kwargs(model, messages, system, max_tokens, temperature)
         if tools:
             kwargs["tools"] = self._tools(tools)
-        if stop_sequences:
-            kwargs["stop_sequences"] = list(stop_sequences)
 
         response = self._client.messages.create(**kwargs)
 
-        # `content` is one list holding both kinds of block. This is the shape
-        # difference that stops being cosmetic the moment tools exist: text and
-        # tool calls arrive interleaved in a single sequence, rather than in
-        # two separate fields.
+        # Text and tool calls arrive mixed together in one list of blocks.
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         for block in response.content:
@@ -173,21 +156,14 @@ class AnthropicProvider:
             if kind == "text":
                 text_parts.append(block.text)
             elif kind == "tool_use":
-                # Arguments arrive already parsed. Nothing to fail here -- the
-                # DeepSeek provider is not so lucky.
+                # Arguments arrive already parsed.
                 tool_calls.append(
                     ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
                 )
 
         return ProviderReply(
             text="".join(text_parts),
-            usage=TokenUsage(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-                # Anthropic supports prompt caching; RepoSage does not enable
-                # it yet, so there is no split to report.
-                cached_input_tokens=0,
-            ),
+            usage=self._usage(response.usage),
             stop_reason=_STOP_REASONS.get(response.stop_reason, response.stop_reason or ""),
             tool_calls=tool_calls,
             raw=response,
@@ -202,6 +178,7 @@ class AnthropicProvider:
         max_tokens: int,
         temperature: float,
     ) -> Iterator[str]:
+        """Yield text chunks as they arrive, then return the usage."""
         kwargs = self._kwargs(model, messages, system, max_tokens, temperature)
 
         with self._client.messages.stream(**kwargs) as stream:
@@ -209,7 +186,4 @@ class AnthropicProvider:
                 yield chunk
             final = stream.get_final_message()
 
-        return TokenUsage(
-            input_tokens=final.usage.input_tokens,
-            output_tokens=final.usage.output_tokens,
-        )
+        return self._usage(final.usage)

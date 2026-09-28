@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -29,6 +30,7 @@ BAD = " FAIL "
 
 
 def main() -> int:
+    """Check settings, key, pricing, one call and one stream; return 0 if all pass."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", help="deepseek or anthropic; defaults to .env")
     args = parser.parse_args()
@@ -42,16 +44,16 @@ def main() -> int:
     settings.max_tokens = 40
     print(f"[{OK}] settings: {describe_target(settings)}")
 
+    variable = API_KEY_ENV[settings.provider]
     if not settings.api_key:
-        variable = API_KEY_ENV[settings.provider]
         print(f"[{BAD}] {variable} is empty. Add it to .env.")
         return 1
-    print(f"[{OK}] {API_KEY_ENV[settings.provider]} present ({len(settings.api_key)} chars)")
+    print(f"[{OK}] {variable} present ({len(settings.api_key)} chars)")
 
     spec = spec_for(settings.model)
-    price = spec.price_at()
-    band = "peak" if spec.is_peak(__import__("datetime").datetime.now(
-        __import__("datetime").timezone.utc)) else "off-peak"
+    now = datetime.now(timezone.utc)
+    price = spec.price_at(now)
+    band = "peak" if spec.is_peak(now) else "off-peak"
     print(
         f"[{OK}] pricing: {settings.model} at {band} rates — "
         f"${price.input_per_mtok}/MTok in, ${price.output_per_mtok}/MTok out"
@@ -59,9 +61,7 @@ def main() -> int:
 
     client = LLMClient(settings)
 
-    # One non-streaming call. The system prompt is deliberately something the
-    # reply must obey, so a silently-dropped system prompt shows up as a wrong
-    # answer rather than as nothing at all.
+    # The reply must obey the system prompt, so a dropped system prompt shows as a wrong answer.
     try:
         response = client.complete(
             prompt="Say the word: online",
@@ -83,8 +83,7 @@ def main() -> int:
             "OpenAI-style endpoint that usually means it was never sent."
         )
 
-    # And one stream. Usage arrives only at the end, so a non-zero token count
-    # here proves the end-of-stream accounting actually fired.
+    # Stream usage arrives only at the end, so a recorded call proves that accounting ran.
     before = client.usage.calls
     try:
         chunks = sum(1 for _ in client.stream(prompt="Count to three.", max_tokens=30))

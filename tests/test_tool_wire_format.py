@@ -1,15 +1,7 @@
-"""Translating one neutral history into two vendors' wire formats.
-
-These are the tests that would have caught every porting bug in this project.
-Each one pins a difference that produces either an API error or — worse —
-silently wrong behaviour: a dropped system prompt, consecutive user turns, a
-tool call that never gets executed.
-
-No network and no API key: every method under test is static, so the providers
-are exercised without being constructed.
-"""
+"""Tests that one neutral history is translated correctly into each vendor's wire format."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,11 +39,7 @@ TOOL_SPEC = [
 # -- Anthropic -------------------------------------------------------------
 
 def test_anthropic_batches_tool_results_into_one_user_turn():
-    """Two results, one message — because the API requires alternating roles.
-
-    Emitting one user message per result produces consecutive user turns and a
-    400 from the API. This is the least obvious rule in the whole translation.
-    """
+    """Checks that consecutive tool results share one user message on Anthropic."""
     wire = AnthropicProvider._to_wire(HISTORY)
     assert [m["role"] for m in wire] == ["user", "assistant", "user"]
 
@@ -64,19 +52,21 @@ def test_anthropic_batches_tool_results_into_one_user_turn():
 
 
 def test_anthropic_omits_an_empty_text_block():
-    """A model calling a tool often says nothing first, and blank text is rejected."""
+    """Checks that an empty assistant text is left out, since Anthropic rejects it."""
     blocks = AnthropicProvider._to_wire(HISTORY)[1]["content"]
     assert [b["type"] for b in blocks] == ["tool_use", "tool_use"]
     assert blocks[0]["input"] == {"path": "a.py"}  # already an object, not a string
 
 
 def test_anthropic_keeps_text_and_tool_calls_in_one_content_list():
+    """Checks that assistant text and tool calls sit in one content list."""
     history = [{"role": "assistant", "content": "Let me look.", "tool_calls": [CALL]}]
     blocks = AnthropicProvider._to_wire(history)[0]["content"]
     assert [b["type"] for b in blocks] == ["text", "tool_use"]
 
 
 def test_anthropic_tool_spec_uses_input_schema():
+    """Checks that Anthropic tool specs carry the schema as input_schema."""
     spec = AnthropicProvider._tools(TOOL_SPEC)[0]
     assert set(spec) == {"name", "description", "input_schema"}
 
@@ -84,13 +74,13 @@ def test_anthropic_tool_spec_uses_input_schema():
 # -- DeepSeek --------------------------------------------------------------
 
 def test_deepseek_puts_the_system_prompt_in_the_message_list():
-    """The porting bug that fails silently: no error, just a worse answer."""
+    """Checks that DeepSeek gets the system prompt as the first message."""
     wire = DeepSeekProvider._to_wire(HISTORY, "be terse")
     assert wire[0] == {"role": "system", "content": "be terse"}
 
 
 def test_deepseek_serialises_tool_arguments_to_a_json_string():
-    """Anthropic sends an object here; OpenAI-style sends a string."""
+    """Checks that DeepSeek tool-call arguments are sent as a JSON string."""
     wire = DeepSeekProvider._to_wire(HISTORY, None)
     assistant = next(m for m in wire if m["role"] == "assistant")
     arguments = assistant["tool_calls"][0]["function"]["arguments"]
@@ -99,7 +89,7 @@ def test_deepseek_serialises_tool_arguments_to_a_json_string():
 
 
 def test_deepseek_gives_each_result_its_own_message_and_marks_errors_in_text():
-    """There is no is_error field in this format, so the text has to carry it."""
+    """Checks that each DeepSeek tool result is its own message, with errors marked in the text."""
     wire = DeepSeekProvider._to_wire(HISTORY, None)
     results = [m for m in wire if m["role"] == "tool"]
     assert len(results) == 2
@@ -108,6 +98,7 @@ def test_deepseek_gives_each_result_its_own_message_and_marks_errors_in_text():
 
 
 def test_deepseek_tool_spec_wraps_the_same_schema_in_a_function_envelope():
+    """Checks that DeepSeek tool specs wrap the same schema in a function envelope."""
     spec = DeepSeekProvider._tools(TOOL_SPEC)[0]
     assert spec["type"] == "function"
     # Different key, identical JSON Schema — which is why one registry serves both.
@@ -117,17 +108,13 @@ def test_deepseek_tool_spec_wraps_the_same_schema_in_a_function_envelope():
 # -- the known DeepSeek defect --------------------------------------------
 
 def test_a_bare_json_object_naming_a_tool_is_flagged():
+    """Checks that a reply that is only a JSON tool call is flagged."""
     text = '{"name": "get_file", "arguments": {"path": "a.py"}}'
     assert looks_like_unparsed_tool_call(text, ["get_file"])
 
 
 def test_prose_that_merely_discusses_a_tool_is_not_flagged():
-    """The false positive that would matter most.
-
-    RepoSage answers questions *about source code*. A model explaining what
-    get_file does is not calling it — and a loose check would break exactly the
-    questions this project exists to answer.
-    """
+    """Checks that text merely talking about a tool is not flagged."""
     for text in [
         "You can use get_file to read a file, like get_file(path='a.py').",
         'Call it with {"name": "get_file"} — that is the JSON shape it expects.',
@@ -137,10 +124,12 @@ def test_prose_that_merely_discusses_a_tool_is_not_flagged():
 
 
 def test_unknown_tool_names_in_json_are_not_flagged():
+    """Checks that JSON naming a tool we didn't offer is not flagged."""
     assert not looks_like_unparsed_tool_call('{"name": "some_other_thing"}', ["get_file"])
 
 
 def test_contract_check_raises_when_a_tool_call_arrives_as_text():
+    """Checks that a tool call sent as text raises ProviderContractError."""
     with pytest.raises(ProviderContractError, match="serialised a tool call"):
         DeepSeekProvider._check_contract(
             text='{"name": "get_file", "arguments": {"path": "a.py"}}',
@@ -151,11 +140,13 @@ def test_contract_check_raises_when_a_tool_call_arrives_as_text():
 
 
 def test_contract_check_raises_on_tool_calls_finish_with_no_calls():
+    """Checks that finish_reason 'tool_calls' with no calls raises."""
     with pytest.raises(ProviderContractError, match="no tool_calls"):
         DeepSeekProvider._check_contract("", [], "tool_calls", TOOL_SPEC)
 
 
 def test_contract_check_passes_a_normal_reply():
+    """Checks that normal text and normal tool calls pass the contract check."""
     DeepSeekProvider._check_contract("Routing works like this...", [], "stop", TOOL_SPEC)
     DeepSeekProvider._check_contract("", [CALL], "tool_calls", TOOL_SPEC)
 
@@ -163,32 +154,32 @@ def test_contract_check_passes_a_normal_reply():
 # -- thinking mode --------------------------------------------------------
 
 class _Sent(Exception):
-    """Raised by the fake transport once the request has been captured."""
+    """Raised by the fake transport once it has captured the request."""
 
 
 class _CapturingCompletions:
+    """A fake chat.completions object that records the request, then stops."""
     def __init__(self) -> None:
+        """Start with no captured request."""
         self.kwargs: dict = {}
 
     def create(self, **kwargs):
+        """Save the request arguments, then raise _Sent."""
         self.kwargs = kwargs
         raise _Sent
 
 
 def _provider_with_capture() -> tuple[DeepSeekProvider, _CapturingCompletions]:
+    """Build a DeepSeekProvider whose API client is the capturing fake."""
     provider = DeepSeekProvider(api_key="unused", timeout_s=1.0)
     completions = _CapturingCompletions()
-    provider._client = type("Client", (), {"chat": type("Chat", (), {"completions": completions})})()
+    provider._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return provider, completions
 
 
 @pytest.mark.parametrize("call", ["complete", "stream"])
 def test_deepseek_requests_disable_thinking(call):
-    """V4 thinks by default and bills the reasoning against max_tokens.
-
-    Left on, a small max_tokens is spent entirely on hidden reasoning and the
-    reply comes back empty with finish reason "length".
-    """
+    """Checks that DeepSeek requests turn thinking off (it would use up max_tokens)."""
     provider, completions = _provider_with_capture()
     request = dict(
         model="deepseek-v4-flash",

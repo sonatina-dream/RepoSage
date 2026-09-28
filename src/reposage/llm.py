@@ -1,27 +1,6 @@
-"""The one door every model call in RepoSage passes through.
+"""The client every model call goes through: cost tracking, a spend ceiling and retries.
 
-Three things this adds over calling a vendor SDK directly, each because of
-something that bites later:
-
-1. **Token and cost accounting.** Every response carries usage. If you do not
-   add it up at the moment of the call you will never answer "what did that
-   agent run cost?", because by phase 3 a single user question becomes eight
-   API calls and nothing else sees all of them.
-
-2. **A spend ceiling.** Enforced here rather than at the call sites, and
-   deliberately not per-provider: it is the one guard rail that has to hold
-   everywhere. An agent loop with a bug is a `while True:` around a paid API;
-   the ceiling turns that from an invoice into an exception.
-
-3. **Explicit retries.** Both SDKs would retry some failures for us. We turn
-   that off and do it by hand, because from phase 3 the loop must distinguish
-   two failures that look similar and need opposite handling: "the transport
-   failed, resend the same request" and "the model returned something we
-   cannot use, send it back with the error". Only the first belongs here.
-
-What is *not* here is any knowledge of a vendor's wire format. That lives in
-providers/, so that everything above this line -- extraction, the agent loop,
-the eval harness -- is written once and runs against either.
+Vendor wire formats live in providers/; nothing here knows which vendor is serving.
 """
 
 from __future__ import annotations
@@ -32,21 +11,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Sequence
 
-from .config import Settings, estimate_cost, format_usd, provider_for
+from .config import Settings, estimate_cost, format_usd
 from .providers import Message, Provider, TokenUsage, ToolCall, build_provider
 
 
 class BudgetExceeded(RuntimeError):
-    """Raised when a request would push cumulative spend past the ceiling.
-
-    Raised *before* the request is sent. A budget check that runs afterwards
-    only tells you about money you have already spent.
-    """
+    """Raised before sending a request that could push total spend past the ceiling."""
 
 
 @dataclass
 class Usage:
-    """Running totals for one client's lifetime."""
+    """Running totals of calls, tokens and cost for one client."""
 
     calls: int = 0
     input_tokens: int = 0
@@ -55,6 +30,7 @@ class Usage:
     cost_usd: float = 0.0
 
     def summary(self) -> str:
+        """One line with calls, tokens and total cost."""
         cached = (
             f" ({self.cached_input_tokens} cached)" if self.cached_input_tokens else ""
         )
@@ -66,13 +42,7 @@ class Usage:
 
 @dataclass
 class LLMResponse:
-    """One model reply, with its accounting attached.
-
-    `stop_reason` matters more than it looks. "end_turn" means the model
-    finished its thought; "max_tokens" means we cut it off mid-sentence, which
-    silently corrupts anything downstream that parses the text. Phase 1 turns
-    that into a validation error; phase 3 has to handle it in the loop.
-    """
+    """One model reply: its text, tool calls, token counts, cost and stop reason."""
 
     text: str
     model: str
@@ -87,29 +57,28 @@ class LLMResponse:
 
     @property
     def truncated(self) -> bool:
+        """True if the reply was cut off by the max_tokens limit."""
         return self.stop_reason == "max_tokens"
 
     @property
     def wants_tools(self) -> bool:
-        """The model asked for tools and is waiting for their results.
-
-        Phase 2 acts on this once, by hand. Phase 3 turns it into the loop
-        condition.
-        """
+        """True if the model asked for tools and is waiting for their results."""
         return bool(self.tool_calls)
 
 
 class LLMClient:
+    """Sends requests to the configured provider and tracks what they cost."""
+
     def __init__(
         self,
         settings: Settings | None = None,
         provider: Provider | None = None,
     ) -> None:
+        """Use the given settings and provider, or build them from the environment."""
         self.settings = settings or Settings.from_env()
         self.usage = Usage()
 
-        # Injection seam for tests and for phase 5, where the judge and the
-        # system under test must not share a budget.
+        # Tests inject a fake provider here.
         self._provider = provider or build_provider(
             self.settings.provider,
             self.settings.require_api_key(),
@@ -118,13 +87,14 @@ class LLMClient:
 
     @property
     def quality_model(self) -> str:
-        """The model to use where reasoning quality is the deliverable."""
+        """The model to use where reasoning quality matters most."""
         return self.settings.quality_model
 
     # -- budget ------------------------------------------------------------
 
     @property
     def remaining_budget_usd(self) -> float:
+        """Dollars left before the spend ceiling."""
         return max(0.0, self.settings.spend_ceiling_usd - self.usage.cost_usd)
 
     def _estimate_input_tokens(
@@ -133,23 +103,10 @@ class LLMClient:
         system: str | None,
         tools: Sequence[dict[str, Any]] | None = None,
     ) -> int:
-        """Cheap pre-flight estimate: roughly four characters per token.
-
-        Exact token-counting endpoints exist, but they cost a round trip per
-        call. For a guard whose job is "stop a runaway loop", a rough
-        over-estimate is the right trade: it errs toward stopping early, and
-        the exact figure arrives with the response anyway.
-
-        Tool schemas are counted, and they are not a rounding error. They are
-        injected into the model's context on *every* call, so three tools with
-        thorough descriptions can be a larger fixed cost than the user's
-        question. A budget guard that ignores them under-estimates every
-        tool-enabled request.
-        """
+        """Roughly estimate prompt tokens (about 4 characters each), tool schemas included."""
         chars = len(system or "")
         for message in messages:
-            content = message.get("content") or ""
-            chars += len(content) if isinstance(content, str) else len(str(content))
+            chars += len(str(message.get("content") or ""))
             for call in message.get("tool_calls", []):
                 chars += len(call.name) + len(json.dumps(call.arguments))
         for tool in tools or []:
@@ -164,12 +121,11 @@ class LLMClient:
         max_tokens: int,
         tools: Sequence[dict[str, Any]] | None = None,
     ) -> None:
+        """Raise BudgetExceeded if the worst-case cost of this request would pass the ceiling."""
         projected = estimate_cost(
             model,
             self._estimate_input_tokens(messages, system, tools),
-            # Worst case: assume the model uses every output token we allowed,
-            # and assume none of the prompt hits a cache. We cannot know either
-            # until we have already paid for the call.
+            # Worst case: every allowed output token is used, and nothing is cached.
             max_tokens,
         )
         if self.usage.cost_usd + projected > self.settings.spend_ceiling_usd:
@@ -181,6 +137,7 @@ class LLMClient:
             )
 
     def _record(self, model: str, usage: TokenUsage) -> float:
+        """Add one call's tokens and cost to the running totals; return its cost."""
         cost = estimate_cost(
             model,
             usage.input_tokens,
@@ -197,13 +154,7 @@ class LLMClient:
     # -- transport ---------------------------------------------------------
 
     def _with_retries(self, operation, description: str):
-        """Exponential backoff with jitter.
-
-        The jitter is not decoration. Without it, every worker that hit the
-        same rate limit retries at the same instant and re-creates the burst
-        that caused it -- exactly the traffic shape phase 8 produces when
-        several requests stream at once.
-        """
+        """Run `operation`, retrying retryable errors with growing, randomised waits."""
         last_error: Exception | None = None
         for attempt in range(self.settings.max_retries + 1):
             try:
@@ -212,11 +163,9 @@ class LLMClient:
                 last_error = exc
                 if attempt == self.settings.max_retries:
                     break
+                # Random jitter stops clients that failed together from retrying together.
                 delay = (2 ** attempt) + random.uniform(0, 0.5)
-                # The reason is printed, not just the type. Some retryable
-                # failures are provider defects rather than transport hiccups,
-                # and a silent retry of those would hide exactly what you need
-                # to see.
+                # Print the reason: some retryable errors are provider defects worth seeing.
                 print(
                     f"  [retry] {description} failed ({type(exc).__name__}: "
                     f"{str(exc)[:160]}); retrying in {delay:.1f}s "
@@ -232,6 +181,7 @@ class LLMClient:
 
     @staticmethod
     def _as_messages(prompt: str | None, messages: Sequence[Message] | None) -> list[Message]:
+        """Turn a plain prompt or a message list into a message list (exactly one is allowed)."""
         if (prompt is None) == (messages is None):
             raise ValueError("Pass exactly one of `prompt` or `messages`.")
         if prompt is not None:
@@ -248,16 +198,8 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         tools: Sequence[dict[str, Any]] | None = None,
-        stop_sequences: Sequence[str] | None = None,
     ) -> LLMResponse:
-        """Send one request and return the text plus its accounting.
-
-        `messages` is the full conversation, every time. Both APIs are
-        stateless: neither remembers the previous call, so "the conversation"
-        is a list we resend and grow ourselves. That is not a limitation to
-        work around -- it is what makes the agent loop in phase 3 inspectable,
-        and why context budget becomes a real problem there.
-        """
+        """Send one request (the whole conversation each time) and return the reply with its cost."""
         model = model or self.settings.model
         max_tokens = max_tokens or self.settings.max_tokens
         temperature = self.settings.temperature if temperature is None else temperature
@@ -273,7 +215,6 @@ class LLMClient:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 tools=tools,
-                stop_sequences=stop_sequences,
             ),
             f"{self._provider.name}.complete",
         )
@@ -303,21 +244,9 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> Iterator[str]:
-        """Yield text as it is generated.
+        """Yield the reply's text piece by piece; usage is recorded when the stream ends.
 
-        Streaming changes nothing about what the model produces or what it
-        costs -- same tokens, same price. It changes when the user sees the
-        first one, which is the difference between a six-second wait and a
-        response that starts immediately.
-
-        Note the `yield from`: it forwards every chunk to our caller *and*
-        hands us the provider's return value when the stream ends. Usage is
-        only knowable at the end, so this is where accounting happens.
-
-        Retries are deliberately absent. A stream that fails halfway has
-        already delivered text to the caller; resending it would duplicate
-        output rather than repair it. Phase 8 handles mid-stream failure at
-        the transport layer, where the client can be told to discard.
+        Never retried: a half-delivered stream can't be resent without duplicating text.
         """
         model = model or self.settings.model
         max_tokens = max_tokens or self.settings.max_tokens
@@ -326,6 +255,7 @@ class LLMClient:
 
         self._guard_budget(model, payload, system, max_tokens)
 
+        # `yield from` passes chunks through and returns the provider's final usage.
         usage = yield from self._provider.stream(
             model=model,
             messages=payload,
@@ -338,7 +268,7 @@ class LLMClient:
 
 
 def describe_target(settings: Settings) -> str:
-    """One line naming who is about to be billed, for the top of a script run."""
+    """One line naming the provider, model and spend ceiling, printed at the start of a run."""
     return (
         f"provider={settings.provider} model={settings.model} "
         f"ceiling={format_usd(settings.spend_ceiling_usd)}"

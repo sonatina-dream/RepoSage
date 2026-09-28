@@ -1,18 +1,4 @@
-"""Providers, model IDs, pricing, runtime settings, and cost maths.
-
-Why this file exists at all:
-
-An LLM application has two kinds of constants that a normal service does not.
-The first is the model identifier, which is not a stable abstraction the way a
-database driver version is -- swapping one model for another changes the
-quality, latency and price of every answer the system gives. The second is a
-price list that lives on someone else's website and changes without your
-deployment knowing. Scattering either of those through the codebase means you
-can never answer "what did that run cost?" or "which model produced this eval
-number?".
-
-So both live here, in one file, and everything else imports from it.
-"""
+"""Providers, model IDs, prices, runtime settings and cost maths, all in one place."""
 
 from __future__ import annotations
 
@@ -31,32 +17,18 @@ except ImportError:  # pragma: no cover - convenience only
 # --------------------------------------------------------------------------
 # Providers and models
 # --------------------------------------------------------------------------
-# RepoSage speaks to more than one vendor. Not for its own sake: the phase 5
-# eval suite is far more interesting when the same agent can be pointed at two
-# different models and the difference measured. It also buys a debugging tool
-# that matters from phase 3 onward -- when the agent misbehaves, flipping one
-# environment variable tells you whether the fault is in your loop or in the
-# provider.
 ANTHROPIC = "anthropic"
 DEEPSEEK = "deepseek"
 
-# Anthropic. Aliases like `claude-sonnet-5` float: they point at whatever the
-# current snapshot is, so a model upgrade can silently change your outputs.
-# Fine while iterating, unacceptable for evaluation -- pin dated snapshots
-# before phase 5 records any measured number.
+# Aliases like `claude-sonnet-5` float to the latest snapshot; pin dated IDs before evals.
 HAIKU = "claude-haiku-4-5-20251001"
 SONNET = "claude-sonnet-5"
 
-# DeepSeek. Note these are served through an OpenAI-compatible endpoint, which
-# is a wire-format detail the provider layer absorbs; see providers/.
+# Served through an OpenAI-compatible endpoint; see providers/.
 DEEPSEEK_FLASH = "deepseek-v4-flash"
 DEEPSEEK_PRO = "deepseek-v4-pro"
 
-# Every provider gets two roles rather than one default. `fast` is what runs
-# while iterating -- loops, smoke tests, anything you will run twenty times.
-# `quality` is for the places where the reasoning itself is the deliverable:
-# extraction from messy real text, the agent's tool-selection decisions, and
-# the LLM-as-judge in phase 5.
+# `fast` for iterating; `quality` where the reasoning itself is the deliverable.
 PROVIDER_MODELS = {
     ANTHROPIC: {"fast": HAIKU, "quality": SONNET},
     DEEPSEEK: {"fast": DEEPSEEK_FLASH, "quality": DEEPSEEK_PRO},
@@ -68,38 +40,19 @@ DEFAULT_PROVIDER = os.getenv("REPOSAGE_PROVIDER", DEEPSEEK)
 # --------------------------------------------------------------------------
 # Pricing
 # --------------------------------------------------------------------------
-# USD per million tokens. This table is a liability: it is a copy of numbers
-# that live on two vendors' pricing pages, and copies go stale. Hence the
-# verification date -- if you are reading this long after it, re-check before
-# quoting any cost figure in the README.
-#
-# Sources:
+# USD per million tokens, copied from the vendors' pricing pages. Re-check if stale:
 #   https://platform.claude.com/docs/en/about-claude/pricing
 #   https://api-docs.deepseek.com/quick_start/pricing
 PRICING_LAST_VERIFIED = "2026-08-27"
 
-# DeepSeek charges a higher rate during defined peak windows and half that
-# outside them. Weekends are entirely off-peak. Hours are UTC; from Rome
-# (UTC+2 in summer) this puts 08:00-12:00 local squarely in the expensive
-# band, which is most of a working morning.
+# DeepSeek bills the full rate inside these UTC windows on weekdays, half outside them.
 DEEPSEEK_PEAK_WINDOWS_UTC = ((1, 4), (6, 10))
 DEEPSEEK_PEAK_WEEKDAYS = (0, 1, 2, 3, 4)  # Monday-Friday
 
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """Price per *million* tokens, in the units the pricing pages use.
-
-    Storing dollars-per-million rather than dollars-per-token keeps the
-    literals human-checkable against the published tables. The division to
-    per-token happens once, in `estimate_cost`.
-
-    `cached_input_per_mtok` is set only for providers that bill prompt-cache
-    hits at a separate rate and report the split in their usage object.
-    DeepSeek does both; it matters enormously from phase 3, where an agent
-    loop resends a growing history on every turn and most of that history is
-    a cache hit by the second iteration.
-    """
+    """Prices in USD per million tokens; the cached rate is set only where a vendor has one."""
 
     input_per_mtok: float
     output_per_mtok: float
@@ -108,12 +61,7 @@ class ModelPrice:
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """A model, its provider, and how it is billed.
-
-    `off_peak` is None for flat-rate models, which is most of them. Where it
-    is set, `peak_windows_utc` says when the standard rate applies; everything
-    outside those windows bills at the discounted rate.
-    """
+    """A model, its provider, and how it is billed (off_peak is None for flat-rate models)."""
 
     id: str
     provider: str
@@ -123,6 +71,7 @@ class ModelSpec:
     peak_weekdays: tuple[int, ...] = ()
 
     def is_peak(self, when: datetime) -> bool:
+        """Return True if the full (peak) rate applies at this moment."""
         if self.off_peak is None:
             return True
         moment = when.astimezone(timezone.utc)
@@ -131,21 +80,18 @@ class ModelSpec:
         return any(start <= moment.hour < end for start, end in self.peak_windows_utc)
 
     def price_at(self, when: datetime | None = None) -> ModelPrice:
-        """Resolve the applicable price.
-
-        `when` is a parameter rather than an implicit call to `now()` so that
-        cost maths stays testable. A function that reads the wall clock cannot
-        be asserted against, and this one decides what you are billed.
-        """
+        """Return the price that applies at `when` (default: now)."""
         moment = when or datetime.now(timezone.utc)
         return self.standard if self.is_peak(moment) else (self.off_peak or self.standard)
 
 
 def _anthropic(model_id: str, input_price: float, output_price: float) -> ModelSpec:
+    """Build a flat-rate Anthropic model entry."""
     return ModelSpec(model_id, ANTHROPIC, ModelPrice(input_price, output_price))
 
 
 def _deepseek(model_id: str, peak: ModelPrice, off_peak: ModelPrice) -> ModelSpec:
+    """Build a DeepSeek model entry with peak and off-peak prices."""
     return ModelSpec(
         model_id,
         DEEPSEEK,
@@ -178,21 +124,15 @@ MODELS: dict[str, ModelSpec] = {
 
 
 class UnknownModelError(KeyError):
-    """Raised when we are asked to price a model we have no entry for.
-
-    Deliberately loud. The tempting alternative -- fall back to 0.0 for an
-    unknown model -- produces a cost report that reads "$0.00" for the most
-    expensive run you ever made. A missing price is a bug, not a zero.
-    """
+    """Raised for a model with no price entry, instead of silently pricing it at $0."""
 
 
 def spec_for(model: str) -> ModelSpec:
-    """Look up a model, tolerating dated snapshots of a known family."""
+    """Look up a model's price entry; dated snapshots match their family name."""
     if model in MODELS:
         return MODELS[model]
 
-    # `claude-sonnet-5-20260401` should price like `claude-sonnet-5`. Match the
-    # longest known prefix so a shorter, cheaper family name cannot win.
+    # Longest matching prefix wins, so a shorter, cheaper family cannot.
     candidates = [name for name in MODELS if model.startswith(name)]
     if candidates:
         return MODELS[max(candidates, key=len)]
@@ -204,6 +144,7 @@ def spec_for(model: str) -> ModelSpec:
 
 
 def provider_for(model: str) -> str:
+    """Return the provider name that serves a model."""
     return spec_for(model).provider
 
 
@@ -215,19 +156,7 @@ def estimate_cost(
     cached_input_tokens: int = 0,
     at: datetime | None = None,
 ) -> float:
-    """Cost in USD for one request's token counts.
-
-    `input_tokens` is the *total* prompt size; `cached_input_tokens` is the
-    subset of it that hit the provider's prompt cache and is billed at the
-    cheaper rate. Providers that do not report a cache split simply pass 0.
-
-    Note the asymmetry between input and output: output costs roughly three to
-    five times what input costs, depending on the model. That single fact
-    drives most cost decisions in this project. It is why stuffing retrieved
-    code into a prompt (phase 4) is cheaper than it feels, why an agent that
-    narrates its reasoning at length (phase 3) is expensive, and why
-    `max_tokens` is a budget lever and not just a safety limit.
-    """
+    """Return the USD cost of one request; cached input tokens bill at the cheaper rate."""
     price = spec_for(model).price_at(at)
 
     cached = max(0, min(cached_input_tokens, input_tokens))
@@ -246,7 +175,7 @@ def estimate_cost(
 
 
 def format_usd(amount: float) -> str:
-    """Render small dollar amounts without rounding them into invisibility."""
+    """Format dollars, with 6 decimals for amounts under a cent so they don't show as $0."""
     if amount and abs(amount) < 0.01:
         return f"${amount:.6f}"
     return f"${amount:.4f}"
@@ -256,6 +185,7 @@ def format_usd(amount: float) -> str:
 # Settings
 # --------------------------------------------------------------------------
 def _env_float(name: str, default: float) -> float:
+    """Read a number from an environment variable, or return the default if unset."""
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
@@ -266,6 +196,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read a whole number from an environment variable, or return the default."""
     return int(_env_float(name, default))
 
 
@@ -275,24 +206,19 @@ API_KEY_ENV = {ANTHROPIC: "ANTHROPIC_API_KEY", DEEPSEEK: "DEEPSEEK_API_KEY"}
 
 @dataclass
 class Settings:
-    """Runtime knobs, resolved once from the environment."""
+    """Runtime settings: provider, key, model, limits and retries."""
 
     provider: str = DEFAULT_PROVIDER
     api_key: str | None = None
     model: str | None = None  # None -> the provider's `fast` model
 
-    # Caps the *output* of a single call. Also the number the budget guard has
-    # to assume the model will actually produce, since output length is not
-    # knowable in advance.
+    # Max output per call; the budget guard assumes the model uses all of it.
     max_tokens: int = 1024
 
-    # 0.0 for anything whose output we parse or evaluate; higher only when we
-    # deliberately want variety. Phase 0 demo 3 shows why.
+    # 0.0 for anything we parse; higher only when we want variety.
     temperature: float = 0.0
 
-    # Hard ceiling on cumulative spend for the lifetime of one LLMClient.
-    # Small on purpose: this is the number that stops a misbehaving agent loop
-    # in phase 3 from running up a bill overnight.
+    # Hard cap on total spend for one LLMClient.
     spend_ceiling_usd: float = 1.00
 
     # Transport-level retries we perform ourselves (see llm.py).
@@ -300,31 +226,28 @@ class Settings:
     request_timeout_s: float = 60.0
 
     def __post_init__(self) -> None:
+        """Reject unknown providers and default the model to the fast one."""
         if self.provider not in PROVIDER_MODELS:
             raise ValueError(
                 f"Unknown provider {self.provider!r}. "
                 f"Choose one of: {', '.join(PROVIDER_MODELS)}."
             )
         if self.model is None:
-            self.model = PROVIDER_MODELS[self.provider]["fast"]
+            self.model = self.fast_model
 
     @property
     def fast_model(self) -> str:
+        """The provider's cheap model, for iterating."""
         return PROVIDER_MODELS[self.provider]["fast"]
 
     @property
     def quality_model(self) -> str:
+        """The provider's stronger model, for reasoning-heavy work."""
         return PROVIDER_MODELS[self.provider]["quality"]
 
     @classmethod
     def from_env(cls, provider: str | None = None, model: str | None = None) -> "Settings":
-        """Resolve settings, letting a caller override the provider.
-
-        The override matters because the API key is provider-specific: asking
-        for DeepSeek must read DEEPSEEK_API_KEY, not whatever the default
-        provider's variable happens to hold. Selecting the provider and
-        selecting its key are one decision, so they happen in one place.
-        """
+        """Build settings from environment variables; the API key follows the chosen provider."""
         provider = provider or os.getenv("REPOSAGE_PROVIDER", DEFAULT_PROVIDER)
         if provider not in API_KEY_ENV:
             raise ValueError(
@@ -334,14 +257,15 @@ class Settings:
             provider=provider,
             api_key=os.getenv(API_KEY_ENV[provider]),
             model=model or os.getenv("REPOSAGE_MODEL") or None,
-            max_tokens=_env_int("REPOSAGE_MAX_TOKENS", 1024),
-            temperature=_env_float("REPOSAGE_TEMPERATURE", 0.0),
-            spend_ceiling_usd=_env_float("REPOSAGE_SPEND_CEILING_USD", 1.00),
-            max_retries=_env_int("REPOSAGE_MAX_RETRIES", 3),
-            request_timeout_s=_env_float("REPOSAGE_TIMEOUT_S", 60.0),
+            max_tokens=_env_int("REPOSAGE_MAX_TOKENS", cls.max_tokens),
+            temperature=_env_float("REPOSAGE_TEMPERATURE", cls.temperature),
+            spend_ceiling_usd=_env_float("REPOSAGE_SPEND_CEILING_USD", cls.spend_ceiling_usd),
+            max_retries=_env_int("REPOSAGE_MAX_RETRIES", cls.max_retries),
+            request_timeout_s=_env_float("REPOSAGE_TIMEOUT_S", cls.request_timeout_s),
         )
 
     def require_api_key(self) -> str:
+        """Return the API key, or raise a clear error saying which variable to set."""
         if not self.api_key:
             variable = API_KEY_ENV[self.provider]
             raise RuntimeError(

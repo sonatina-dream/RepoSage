@@ -16,8 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-# The package is not installed, so make `src/` importable. `pip install -e .`
-# would also work; this keeps the scripts runnable straight from a clone.
+# The package is not installed, so make `src/` importable.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from reposage.config import Settings, format_usd  # noqa: E402
@@ -25,21 +24,13 @@ from reposage.llm import LLMClient, describe_target  # noqa: E402
 
 
 def banner(title: str) -> None:
+    """Print a title between two lines of '=' signs."""
     print(f"\n{'=' * 72}\n{title}\n{'=' * 72}")
 
 
 # --------------------------------------------------------------------------
 def demo_1_first_call(client: LLMClient) -> None:
-    """Messages: the request is a list of turns; the reply shape is per vendor.
-
-    Two things to notice in the output. The system prompt is instruction, not
-    conversation -- a separate parameter on Anthropic, the first message on
-    OpenAI-style APIs. And the raw reply body differs by vendor: Anthropic
-    returns a *list of blocks*, DeepSeek a single string. Today both carry only
-    text, but in phase 2 tool calls arrive alongside it (as `tool_use` blocks,
-    or in a sibling `tool_calls` field), and code that assumed the reply was
-    just text breaks. `response.text` is the provider layer absorbing that.
-    """
+    """Demo 1: send one message with a system prompt and show the reply and its raw shape."""
     banner("Demo 1 - the shape of a call")
 
     response = client.complete(
@@ -60,14 +51,7 @@ def demo_1_first_call(client: LLMClient) -> None:
 
 # --------------------------------------------------------------------------
 def demo_2_tokens_and_cost(client: LLMClient) -> None:
-    """Tokens and cost: where the money actually goes.
-
-    The asymmetry is the lesson. Output tokens cost roughly five times what
-    input tokens cost, so a short question with a long answer can cost more
-    than a long question with a short answer. Practical consequence for later:
-    stuffing retrieved code into the prompt (phase 4) is cheaper than it feels,
-    while an agent that thinks out loud at length (phase 3) is expensive.
-    """
+    """Demo 2: compare cost when tokens go in (cheap) versus out (expensive)."""
     banner("Demo 2 - tokens and cost")
 
     long_in_short_out = client.complete(
@@ -101,19 +85,7 @@ def demo_2_tokens_and_cost(client: LLMClient) -> None:
 
 # --------------------------------------------------------------------------
 def demo_3_temperature(client: LLMClient) -> None:
-    """Temperature: how much the sampler is allowed to wander.
-
-    At 0 the model takes the highest-probability token at each step, so the
-    same prompt gives you (very nearly) the same answer every time. Note
-    "nearly": temperature 0 is not a determinism guarantee -- floating-point
-    non-associativity in batched inference means identical inputs can still
-    diverge occasionally. Treat it as "as repeatable as you can get", not as a
-    seed.
-
-    The rule this project follows: temperature 0 for anything that will be
-    parsed, validated, evaluated or cited. Higher only where variety is the
-    product.
-    """
+    """Demo 3: ask the same question three times at temperature 0 and at 1."""
     banner("Demo 3 - temperature")
 
     prompt = "Give a six-word tagline for a tool that answers questions about a codebase."
@@ -127,15 +99,7 @@ def demo_3_temperature(client: LLMClient) -> None:
 
 # --------------------------------------------------------------------------
 def demo_4_streaming(client: LLMClient) -> None:
-    """Streaming: same tokens, same price, different wall-clock experience.
-
-    Streaming does not make generation faster. It makes the *first* token
-    visible immediately instead of after the whole reply is generated, which is
-    the difference between a UI that feels broken and one that does not. The
-    catch, and it matters for phase 8: usage totals only arrive at the end of
-    the stream, so per-request cost accounting has to happen after the last
-    chunk, not alongside it.
-    """
+    """Demo 4: stream a reply and time the first token versus the full reply."""
     banner("Demo 4 - streaming")
 
     started = time.monotonic()
@@ -161,18 +125,7 @@ def demo_4_streaming(client: LLMClient) -> None:
 
 # --------------------------------------------------------------------------
 def demo_5_statelessness(client: LLMClient) -> None:
-    """Statelessness: there is no conversation, only a list you resend.
-
-    The API remembers nothing between calls. What feels like a conversation is
-    the client resending the whole history every time. Two consequences that
-    shape the rest of this project:
-
-      - Cost grows quadratically with turns. Turn ten pays to re-read turns one
-        through nine. This is why phase 3 needs a context budget rather than an
-        ever-growing list.
-      - Nothing is hidden. The entire state the model sees is a list you own
-        and can print, which is what makes an agent loop debuggable at all.
-    """
+    """Demo 5: show the model remembers nothing unless we resend the history."""
     banner("Demo 5 - statelessness")
 
     history = [{"role": "user", "content": "My favourite number is 17. Just acknowledge it."}]
@@ -204,6 +157,7 @@ DEMOS = {
 
 
 def main() -> None:
+    """Parse arguments and run one demo or all of them."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--demo", type=int, choices=sorted(DEMOS), help="Run a single demo.")
     parser.add_argument("--all", action="store_true", help="Run all five.")
