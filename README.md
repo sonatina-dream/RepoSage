@@ -80,7 +80,7 @@ pip install -r requirements.txt
 cp .env.example .env               # add DEEPSEEK_API_KEY (or ANTHROPIC_API_KEY)
 
 python scripts/check_provider.py   # ~$0.00001 — run this first
-pytest -q                          # 50 tests, no API key needed
+pytest -q                          # 53 tests, no API key needed
 
 python phases/phase00_first_call.py --all
 python phases/phase01_structured_output.py --repo fastapi/fastapi --limit 5
@@ -110,7 +110,7 @@ src/reposage/repo.py                  the shallow clone the code tools read
 phases/phase00_*.py                   five runnable demos of the API fundamentals
 phases/phase01_*.py                   mines closed GitHub issues into validated records
 phases/phase02_*.py                   one tool-calling round trip, every message printed
-tests/                                50 deterministic tests, scripted fakes, no API key
+tests/                                53 deterministic tests, scripted fakes, no API key
 data/issues/                          extracted eval candidates (regenerable, gitignored)
 ```
 

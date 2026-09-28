@@ -1,11 +1,4 @@
-"""The whole round trip, against a scripted provider. No API key, no network.
-
-This is the test that would catch a broken phase 2 end to end: the model asks
-for a tool, we run it, the result goes back matched by id, and the second
-request carries the full history. A live model cannot be relied on to request a
-tool on demand, so the provider is scripted instead — the same seam the phase 3
-agent loop will be tested through.
-"""
+"""End-to-end tool-calling round trip against a scripted provider: no API key, no network."""
 
 import pytest
 from pydantic import BaseModel, Field
@@ -22,21 +15,24 @@ class LookupParams(BaseModel):
 
 
 class ScriptedProvider:
-    """Replays canned replies and records exactly what it was sent."""
+    """A fake provider that replays canned replies and records every request."""
 
     name = "scripted"
     retryable_errors = ()
 
     def __init__(self, *replies: ProviderReply) -> None:
+        """Store the replies to hand back, in order."""
         self.replies = list(replies)
         self.requests: list[dict] = []
 
     def complete(self, **kwargs) -> ProviderReply:
+        """Record the request and return the next canned reply."""
         self.requests.append(kwargs)
         return self.replies.pop(0)
 
 
 def reply(text="", tool_calls=None, stop_reason="end_turn") -> ProviderReply:
+    """Build a canned ProviderReply with fixed token counts."""
     return ProviderReply(
         text=text,
         usage=TokenUsage(input_tokens=100, output_tokens=20),
@@ -47,6 +43,7 @@ def reply(text="", tool_calls=None, stop_reason="end_turn") -> ProviderReply:
 
 @pytest.fixture
 def registry():
+    """A registry with one fake get_file tool."""
     reg = ToolRegistry()
     reg.add(
         Tool(
@@ -61,10 +58,12 @@ def registry():
 
 @pytest.fixture
 def settings():
+    """Settings for a fake DeepSeek client with a $10 ceiling."""
     return Settings(provider="deepseek", api_key="unused", spend_ceiling_usd=10.0)
 
 
 def test_full_round_trip(registry, settings):
+    """Checks the whole loop: tool request, execution, and results sent back matched by id."""
     call = ToolCall(id="call_1", name="get_file", arguments={"path": "app.py"})
     provider = ScriptedProvider(
         reply(tool_calls=[call], stop_reason="tool_use"),
@@ -103,7 +102,7 @@ def test_full_round_trip(registry, settings):
 
 
 def test_a_model_may_decline_to_use_tools(registry, settings):
-    """Not a failure. Forcing a call would defeat the point of offering a choice."""
+    """Checks that answering without tools is treated as a normal reply."""
     provider = ScriptedProvider(reply(text="I can answer that directly."))
     client = LLMClient(settings, provider=provider)
 
@@ -113,7 +112,7 @@ def test_a_model_may_decline_to_use_tools(registry, settings):
 
 
 def test_a_failing_tool_still_produces_a_result_the_model_can_read(registry, settings):
-    """The model's bad guess must be recoverable, not fatal."""
+    """Checks that a failing tool becomes an error result, not a crash."""
     bad = ToolCall(id="call_9", name="get_file", arguments={"wrong_field": "x"})
     provider = ScriptedProvider(
         reply(tool_calls=[bad], stop_reason="tool_use"),
@@ -131,9 +130,12 @@ def test_a_failing_tool_still_produces_a_result_the_model_can_read(registry, set
 
 
 def test_tool_schemas_count_against_the_budget(registry):
-    """They are sent on every call, so a guard that ignores them under-counts."""
-    tight = Settings(provider="deepseek", api_key="unused", spend_ceiling_usd=1e-9)
+    """Checks that the budget guard counts tool schemas, which are sent on every call."""
+    # Haiku is flat-rate, so this holds at any hour: the bare prompt projects
+    # $0.000005 (one output token); the schemas add ~50 input tokens (~$0.00005).
+    tight = Settings(provider="anthropic", api_key="unused", spend_ceiling_usd=2e-5)
     client = LLMClient(tight, provider=ScriptedProvider(reply()))
 
     with pytest.raises(BudgetExceeded):
-        client.complete(prompt="hi", tools=registry.specifications())
+        client.complete(prompt="hi", max_tokens=1, tools=registry.specifications())
+    client.complete(prompt="hi", max_tokens=1)  # the same request without schemas fits

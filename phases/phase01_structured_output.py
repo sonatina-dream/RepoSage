@@ -18,8 +18,6 @@ yardstick for that same model. They get reviewed by hand before they count.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
 
@@ -30,28 +28,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from reposage.config import Settings, format_usd  # noqa: E402
 from reposage.extraction import ExtractionError, IssueSummary, extract  # noqa: E402
 from reposage.llm import BudgetExceeded, LLMClient, describe_target  # noqa: E402
+from reposage.repo import DEFAULT_REPO  # noqa: E402
+from reposage.tools.github_tools import GITHUB_API, github_headers  # noqa: E402
 
-GITHUB_API = "https://api.github.com"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data" / "issues"
 
 
-def github_headers() -> dict[str, str]:
-    """Unauthenticated is 60 requests/hour per IP; a bare token gives 5000."""
-    headers = {"Accept": "application/vnd.github+json"}
-    token = os.getenv("GITHUB_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
 def fetch_closed_issues(repo: str, limit: int) -> list[dict]:
-    """Fetch closed issues, filtering out pull requests.
-
-    The GitHub issues endpoint returns PRs as well -- they are issues with a
-    `pull_request` key. A PR thread is a code review, not a question with an
-    answer, so it is the wrong shape for the eval set. Over-fetch and filter
-    rather than assuming a fixed ratio.
-    """
+    """Fetch the most-commented closed issues (pull requests removed), with their comments."""
     with httpx.Client(timeout=30.0, headers=github_headers()) as http:
         response = http.get(
             f"{GITHUB_API}/repos/{repo}/issues",
@@ -63,6 +47,7 @@ def fetch_closed_issues(repo: str, limit: int) -> list[dict]:
             },
         )
         response.raise_for_status()
+        # The endpoint also returns pull requests; over-fetch, then drop them.
         issues = [item for item in response.json() if "pull_request" not in item][:limit]
 
         for issue in issues:
@@ -74,14 +59,9 @@ def fetch_closed_issues(repo: str, limit: int) -> list[dict]:
 
 
 def render_thread(issue: dict, max_chars: int = 6000) -> str:
-    """Flatten an issue and its comments into the text the model reads.
+    """Turn an issue and its comments into one text for the model, cut to `max_chars`.
 
-    Truncated deliberately. Some threads run to tens of thousands of
-    characters, and paying to send all of it buys very little: the problem
-    statement is at the top and the resolution is usually in the first few
-    replies. Truncating to a known budget also keeps the per-issue cost
-    predictable, which is what makes a 200-issue run a decision you can price
-    beforehand rather than discover afterwards.
+    The cut keeps cost per issue predictable; the answer is usually near the top.
     """
     parts = [
         f"Issue #{issue['number']}: {issue['title']}",
@@ -100,13 +80,13 @@ def render_thread(issue: dict, max_chars: int = 6000) -> str:
 
 
 def main() -> None:
+    """Fetch closed issues, extract a record from each, and save the valid ones."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", default="fastapi/fastapi")
+    parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--provider", help="anthropic or deepseek; defaults to REPOSAGE_PROVIDER.")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument(
         "--model",
-        default=None,
         help="Defaults to the provider's quality model — extraction quality is "
              "the point here, so this is not the usual fast tier.",
     )
@@ -135,9 +115,7 @@ def main() -> None:
                 model=args.model or client.quality_model,
             )
         except ExtractionError as exc:
-            # A failure here is data, not a crash. Some threads genuinely do
-            # not contain an answer, and the run should continue and tell you
-            # how many it dropped.
+            # Some threads have no answer; skip them and keep going.
             print(f"   skipped: {exc}\n")
             continue
         except BudgetExceeded as exc:

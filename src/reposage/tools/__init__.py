@@ -1,4 +1,4 @@
-"""Tools the agent can call, and the registry that keeps them honest."""
+"""The tools the agent can call, and a helper that builds the default set."""
 
 from __future__ import annotations
 
@@ -21,16 +21,10 @@ __all__ = [
 ]
 
 
-def build_default_registry(
-    repo: str = DEFAULT_REPO, root: Path | None = None
-) -> tuple[ToolRegistry, Path]:
-    """The three tools RepoSage ships, wired to a local clone of `repo`.
-
-    Returns the registry and the clone path. Cloning happens here rather than
-    lazily inside a tool because a multi-second `git clone` in the middle of an
-    agent turn looks exactly like a hung model.
-    """
-    clone = root or ensure_clone(repo)
+def build_default_registry(repo: str = DEFAULT_REPO) -> tuple[ToolRegistry, Path]:
+    """Clone `repo` if needed and return a registry with all three tools, plus the clone path."""
+    # Clone up front: a slow clone mid-turn would look like a hung model.
+    clone = ensure_clone(repo)
     registry = ToolRegistry()
     for tool in build_repo_tools(clone) + build_github_tools(repo):
         registry.add(tool)

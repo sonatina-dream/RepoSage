@@ -1,55 +1,26 @@
-"""The tool registry: one place where a tool's schema and its handler stay married.
+"""The tool registry: keeps each tool's schema and handler together, and runs tool calls.
 
-A tool has two halves. There is the schema the model sees -- a name, a
-description, and a JSON Schema for the arguments -- and there is the Python
-function that actually runs. Keeping those in two places guarantees they drift:
-you rename a parameter in the function, the schema still advertises the old
-name, and the failure surfaces at runtime, inside the agent loop, on some
-iteration you cannot easily reproduce.
-
-So the schema is *generated* from a Pydantic model that the handler also
-receives. There is one source of truth. This is the same argument as phase 1's
-`schema_block`, applied to a different problem.
-
-The registry is also the only sensible home for the things every tool needs and
-no tool should implement twice:
-
-  Argument validation. Arguments come from a language model. They are untrusted
-  input in the ordinary security sense, and they are also frequently *nearly*
-  right -- a string where a number belongs, a missing optional. Validating
-  centrally means every tool gets the same treatment.
-
-  Errors as results, not exceptions. This is the design decision that makes an
-  agent an agent. When a tool fails, the failure is returned to the model as a
-  tool result flagged `is_error`, and the model gets to try something else. If
-  a bad path raised instead, the run would die on the model's first typo.
-
-  An output budget. A tool result is not paid for once. It joins the message
-  history, and the history is resent on every subsequent turn -- so one
-  unbounded `search_code` result is billed again on every turn that follows it.
-  Truncation is visible to the model on purpose: told it is seeing 20 of 143
-  matches, it narrows the search; left to assume it saw everything, it answers
-  confidently from a fifth of the evidence.
+Arguments are validated, failures come back to the model as results (never exceptions),
+and long outputs are cut to a budget with a visible note.
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Type
 
 from pydantic import BaseModel, ValidationError
 
 from ..providers import ToolCall, ToolResult
 
-# Roughly 2000 tokens. Generous enough for a good chunk of a source file,
-# small enough that a runaway result cannot poison the rest of the run.
+# About 2,000 tokens: room for a good chunk of a file, but capped.
 DEFAULT_MAX_RESULT_CHARS = 8_000
 
 
 @dataclass
 class Tool:
-    """One callable, plus everything the model needs to decide to call it."""
+    """A tool: its name, the description the model reads, its argument model and its function."""
 
     name: str
     description: str
@@ -57,16 +28,9 @@ class Tool:
     handler: Callable[[Any], str]
 
     def specification(self) -> dict[str, Any]:
-        """The vendor-neutral tool spec. Providers reshape this.
-
-        `description` is not documentation -- it is the only thing the model
-        reads when deciding which tool to use, so it belongs in the same
-        register as a prompt. Tool-selection accuracy is a phase 5 metric, and
-        a vague description is the usual reason it is bad.
-        """
+        """Return the tool's spec (name, description, argument schema) for providers to send."""
         schema = self.params.model_json_schema()
-        # The model gets no value from a schema title echoing the class name,
-        # and every token in here is spent on every call.
+        # The title just repeats the class name; drop it to save tokens on every call.
         schema.pop("title", None)
         return {
             "name": self.name,
@@ -77,13 +41,7 @@ class Tool:
 
 @dataclass
 class ToolInvocation:
-    """One executed call, kept for tracing.
-
-    Phase 3 builds a real trace on top of this. It is here already because the
-    moment there is more than one tool call in flight, "what did it actually
-    run, in what order, and how long did each take" stops being answerable from
-    the printed output.
-    """
+    """A record of one tool call that ran: name, arguments, result and duration."""
 
     name: str
     arguments: dict[str, Any]
@@ -92,7 +50,10 @@ class ToolInvocation:
 
 
 class ToolRegistry:
+    """Holds the available tools and runs the calls the model asks for."""
+
     def __init__(self, max_result_chars: int = DEFAULT_MAX_RESULT_CHARS) -> None:
+        """Start empty, with a character limit for each tool result."""
         self._tools: dict[str, Tool] = {}
         self.max_result_chars = max_result_chars
         self.invocations: list[ToolInvocation] = []
@@ -100,66 +61,50 @@ class ToolRegistry:
     # -- registration ------------------------------------------------------
 
     def add(self, tool: Tool) -> Tool:
+        """Register a tool; raises if the name is already taken."""
         if tool.name in self._tools:
             raise ValueError(f"Tool {tool.name!r} is already registered.")
         self._tools[tool.name] = tool
         return tool
 
-    def register(
-        self, name: str, description: str, params: Type[BaseModel]
-    ) -> Callable[[Callable[[Any], str]], Callable[[Any], str]]:
-        """Decorator form: the handler and its schema declared together."""
-
-        def decorator(handler: Callable[[Any], str]) -> Callable[[Any], str]:
-            self.add(Tool(name=name, description=description, params=params, handler=handler))
-            return handler
-
-        return decorator
-
     # -- inspection --------------------------------------------------------
 
     @property
     def names(self) -> list[str]:
+        """Names of the registered tools."""
         return list(self._tools)
 
     def __contains__(self, name: object) -> bool:
+        """True if a tool with this name is registered."""
         return name in self._tools
 
     def __len__(self) -> int:
+        """Number of registered tools."""
         return len(self._tools)
 
     def specifications(self) -> list[dict[str, Any]]:
-        """What gets sent to the model on every single call."""
+        """Specs of all tools; these are sent to the model on every call."""
         return [tool.specification() for tool in self._tools.values()]
 
     # -- execution ---------------------------------------------------------
 
     def _truncate(self, text: str) -> str:
+        """Cut text to the result limit, adding a note that tells the model what was cut."""
         if len(text) <= self.max_result_chars:
             return text
         kept = text[: self.max_result_chars]
         dropped = len(text) - self.max_result_chars
-        # Said in the result itself, because the model has no other way to know.
         return (
             f"{kept}\n\n[truncated: {dropped} more characters were cut. Narrow "
             f"the request — a line range, a tighter pattern — to see the rest.]"
         )
 
     def dispatch(self, call: ToolCall) -> ToolResult:
-        """Run one requested tool and return a result the model can read.
-
-        Every failure path below produces `is_error=True` rather than raising.
-        That is deliberate, and it is the whole reason the agent can recover:
-        an unknown tool name, a badly typed argument and a handler that threw
-        are all things the model can respond to sensibly if you tell it what
-        happened.
-
-        The one thing not caught here is a bug in this method itself. If the
-        registry is broken, that is ours, and it should crash.
-        """
+        """Run one tool call and return its result; failures become error results, not exceptions."""
         started = time.monotonic()
 
         def finish(content: str, is_error: bool = False) -> ToolResult:
+            """Build the (truncated) result and log the call."""
             result = ToolResult(
                 tool_call_id=call.id, content=self._truncate(content), is_error=is_error
             )
@@ -175,8 +120,7 @@ class ToolRegistry:
 
         tool = self._tools.get(call.name)
         if tool is None:
-            # Naming the alternatives matters. "Unknown tool" tells the model
-            # nothing; listing what exists lets it pick the right one next turn.
+            # List the real tools so the model can pick the right one next turn.
             return finish(
                 f"No tool named {call.name!r}. Available tools: "
                 f"{', '.join(self.names)}.",
@@ -186,33 +130,25 @@ class ToolRegistry:
         try:
             arguments = tool.params.model_validate(call.arguments)
         except ValidationError as exc:
-            # Pydantic's message names the field and the expected type, which
-            # is far more actionable than "invalid arguments". Same trick as
-            # the phase 1 extraction retry: hand back the validator's own words.
+            # Pydantic's message names the bad field and expected type; pass it on.
             return finish(
                 f"Invalid arguments for {call.name!r}:\n{exc}", is_error=True
             )
 
         try:
             output = tool.handler(arguments)
-        except Exception as exc:  # noqa: BLE001 - deliberate; see docstring
+        except Exception as exc:  # noqa: BLE001 - errors go back to the model
             return finish(f"{type(exc).__name__}: {exc}", is_error=True)
 
         return finish(output if output else "(the tool returned no output)")
 
     def dispatch_all(self, calls: list[ToolCall]) -> list[ToolResult]:
-        """Run every call in one assistant turn.
-
-        A model can request several tools at once, and *every* one needs a
-        result before the conversation can continue -- both APIs reject a turn
-        with an unanswered call. Running them sequentially is fine at this
-        scale; phase 3 can parallelise once there is a loop worth optimising.
-        """
+        """Run every tool call from one model turn, in order (each call needs an answer)."""
         return [self.dispatch(call) for call in calls]
 
 
 def results_to_messages(results: list[ToolResult]) -> list[dict[str, Any]]:
-    """Turn results into neutral history entries to append before the next call."""
+    """Turn tool results into history messages to add before the next model call."""
     return [
         {
             "role": "tool",

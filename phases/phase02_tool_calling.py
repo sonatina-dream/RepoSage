@@ -51,10 +51,12 @@ DEFAULT_QUESTION = (
 
 
 def banner(title: str) -> None:
+    """Print a title between two ruler lines."""
     print(f"\n{RULE}\n{title}\n{RULE}")
 
 
 def main() -> None:
+    """Ask one question, run the tools the model requests, and send the results back once."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     parser.add_argument("--repo", default=DEFAULT_REPO)
@@ -79,8 +81,7 @@ def main() -> None:
     if args.show_schemas:
         banner("What the model actually sees")
         print(json.dumps(specifications, indent=2))
-        # Worth internalising: this is sent on *every* call, not once. Tool
-        # descriptions are a permanent line item in your input token bill.
+        # These schemas are sent on every call, so they cost input tokens every time.
         print(f"\n(~{len(json.dumps(specifications)) // 4} tokens, on every request)")
 
     # -- turn 1: ask, offering tools ---------------------------------------
@@ -100,9 +101,7 @@ def main() -> None:
     print(f"tool_calls  : {len(first.tool_calls)}")
 
     if not first.wants_tools:
-        # This is a legitimate outcome, not a failure. A model that can answer
-        # without a tool should. Forcing a call would defeat the point of
-        # letting it choose.
+        # Not a failure: a model that can answer without a tool should.
         banner("It answered without tools")
         print(first.text.strip())
         print(f"\nUsage: {client.usage.summary()}")
@@ -124,9 +123,7 @@ def main() -> None:
     # -- turn 2: hand the results back --------------------------------------
     banner("Turn 2 — the same conversation, with results appended")
 
-    # The assistant turn is replayed *including* its tool calls. Drop them and
-    # the results below are orphans, which both APIs reject: a tool result has
-    # to point at a tool call that is present in the history.
+    # Replay the assistant turn with its tool calls; results without them are rejected.
     history.append(
         {"role": "assistant", "content": first.text, "tool_calls": first.tool_calls}
     )
@@ -152,8 +149,7 @@ def main() -> None:
 
     banner("The answer")
     if second.wants_tools:
-        # Entirely normal: one lookup often reveals the next. Phase 2 stops
-        # here on purpose — continuing is exactly what the phase 3 loop is.
+        # Normal: one lookup often leads to the next. Looping is phase 3's job.
         print(
             f"The model wants {len(second.tool_calls)} more tool call(s): "
             f"{', '.join(c.name for c in second.tool_calls)}.\n"
@@ -165,8 +161,7 @@ def main() -> None:
     banner("Cost")
     print(f"turn 1: {format_usd(first.cost_usd)}   turn 2: {format_usd(second.cost_usd)}")
     print(f"total : {client.usage.summary()}")
-    # The gap between the two turns is the price of the tool results plus the
-    # replayed history — the number that makes context budget a phase 3 problem.
+    # The growth between turns is the tool results plus the replayed history.
     print(
         f"\nTurn 2 sent {second.input_tokens - first.input_tokens} more input "
         f"tokens than turn 1. That growth, every turn, is what phase 3 has to "

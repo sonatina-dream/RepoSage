@@ -1,17 +1,4 @@
-"""The local checkout the code tools read from.
-
-Why a clone rather than the GitHub API. An agent makes five to ten tool calls
-to answer one question. Over the API that is five to ten network round trips
-against a rate limit, and the latency dominates the loop -- you feel it as an
-agent that takes half a minute to say something simple. A shallow clone is a
-one-off cost, after which every read is a local file read: free, instant, and
-available offline. Phase 4 needs a local copy to index anyway.
-
-Shallow (`--depth 1`) because nothing here needs history yet. When phase 4 or 5
-wants "what changed and when", this is the function that grows a `depth`
-argument -- and that is a deliberate decision to make then, with a reason,
-rather than paying for the full history of a large repository now.
-"""
+"""Makes and finds the local shallow clone that the code tools read from."""
 
 from __future__ import annotations
 
@@ -23,18 +10,18 @@ CLONE_ROOT = Path(__file__).resolve().parents[2] / "data" / "repos"
 
 
 class CloneError(RuntimeError):
-    pass
+    """Raised when `git clone` fails."""
 
 
 def clone_path(repo: str, root: Path | None = None) -> Path:
-    """Where `owner/name` lives on disk."""
+    """Return the folder where `owner/name` is (or will be) cloned."""
     if repo.count("/") != 1 or not all(repo.split("/")):
         raise ValueError(f"Expected 'owner/name', got {repo!r}.")
     return (root or CLONE_ROOT) / repo.replace("/", "__")
 
 
 def ensure_clone(repo: str = DEFAULT_REPO, root: Path | None = None) -> Path:
-    """Clone the repository if it is not already on disk. Returns its path."""
+    """Shallow-clone the repository unless it is already on disk; return its folder."""
     destination = clone_path(repo, root)
     if (destination / ".git").exists():
         return destination

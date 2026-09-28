@@ -1,11 +1,4 @@
-"""Cost maths and provider selection. No API key, no network.
-
-Cost code is the easiest thing in an LLM project to get quietly wrong, because
-nothing fails when it is: the run completes, the number printed is just false.
-These tests pin the arithmetic, and in particular they pin the two things that
-make DeepSeek's bill different from a flat rate -- the peak/off-peak schedule
-and the prompt-cache tier.
-"""
+"""Tests for cost maths and settings: peak/off-peak pricing, cache rates and API keys."""
 
 from datetime import datetime, timezone
 
@@ -32,13 +25,14 @@ SATURDAY = datetime(2026, 8, 29, 9, 0, tzinfo=timezone.utc)
 
 
 def test_flat_rate_model_ignores_the_clock():
-    """Anthropic has no schedule; the same call must cost the same at 3am."""
+    """Checks that a flat-rate model costs the same at any time of day."""
     peak = estimate_cost(HAIKU, 1_000_000, 1_000_000, at=PEAK)
     off_peak = estimate_cost(HAIKU, 1_000_000, 1_000_000, at=OFF_PEAK)
     assert peak == off_peak == pytest.approx(6.00)  # $1 in + $5 out
 
 
 def test_deepseek_off_peak_is_half_of_peak():
+    """Checks that DeepSeek's off-peak price is half the peak price."""
     peak = estimate_cost(DEEPSEEK_FLASH, 1_000_000, 1_000_000, at=PEAK)
     off_peak = estimate_cost(DEEPSEEK_FLASH, 1_000_000, 1_000_000, at=OFF_PEAK)
     assert peak == pytest.approx(0.44 + 1.32)
@@ -46,18 +40,13 @@ def test_deepseek_off_peak_is_half_of_peak():
 
 
 def test_weekends_are_never_peak():
-    """The peak window is weekdays only, so Saturday 09:00 bills off-peak."""
+    """Checks that weekend hours always bill at the off-peak rate."""
     assert not spec_for(DEEPSEEK_FLASH).is_peak(SATURDAY)
     assert estimate_cost(DEEPSEEK_FLASH, 1_000_000, 0, at=SATURDAY) == pytest.approx(0.22)
 
 
 def test_cached_prompt_tokens_bill_at_the_cache_rate():
-    """A subset of the prompt, not an addition to it.
-
-    This is the one that matters from phase 3: the agent resends a growing
-    history every turn, so most of the prompt becomes a cache hit and the true
-    cost is a fraction of what a naive input-token count suggests.
-    """
+    """Checks that cached prompt tokens are a cheaper part of the prompt, not extra tokens."""
     all_fresh = estimate_cost(DEEPSEEK_FLASH, 1_000_000, 0, at=PEAK)
     all_cached = estimate_cost(
         DEEPSEEK_FLASH, 1_000_000, 0, cached_input_tokens=1_000_000, at=PEAK
@@ -68,23 +57,25 @@ def test_cached_prompt_tokens_bill_at_the_cache_rate():
 
 
 def test_cached_tokens_cannot_exceed_the_prompt():
-    """Defensive: a bad usage report must not produce a negative bill."""
+    """Checks that a bad cache count can never produce a negative cost."""
     cost = estimate_cost(DEEPSEEK_FLASH, 1000, 0, cached_input_tokens=99_999, at=PEAK)
     assert cost > 0
 
 
 def test_unknown_model_raises_rather_than_pricing_at_zero():
+    """Checks that pricing an unknown model raises instead of returning $0."""
     with pytest.raises(UnknownModelError):
         estimate_cost("gpt-9-imaginary", 100, 100)
 
 
 def test_dated_snapshots_price_like_their_family():
+    """Checks that a dated model ID gets its family's price."""
     assert provider_for("claude-sonnet-5-20260401") == ANTHROPIC
     assert estimate_cost("claude-sonnet-5-20260401", 1_000_000, 0) == pytest.approx(2.00)
 
 
 def test_settings_pick_the_right_key_variable_per_provider(monkeypatch):
-    """Selecting a provider and selecting its API key is one decision."""
+    """Checks that each provider reads its own API key variable."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
 
@@ -93,6 +84,7 @@ def test_settings_pick_the_right_key_variable_per_provider(monkeypatch):
 
 
 def test_each_provider_has_a_fast_and_a_quality_model():
+    """Checks that every provider defines both a fast and a quality model."""
     for provider in (ANTHROPIC, DEEPSEEK):
         settings = Settings(provider=provider, api_key="x")
         assert settings.model == settings.fast_model

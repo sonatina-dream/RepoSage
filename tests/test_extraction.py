@@ -1,13 +1,7 @@
-"""Deterministic tests for the structured-output layer. No API key required.
-
-That last part is the point. The interesting behaviour in `extraction.py` is
-what happens when the model gets it *wrong* -- and you cannot reliably provoke
-a real model into returning malformed JSON on demand. So the model is faked and
-the failures are scripted, which makes the retry path testable, fast, and free.
-This is the same seam phase 3 will use to test the agent loop.
-"""
+"""Tests for structured extraction, using a scripted fake model: no API key needed."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -35,27 +29,24 @@ VALID_PAYLOAD = {
 }
 
 
-class FakeResponse:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
 class FakeClient:
-    """A scripted model: hands back canned replies and records how it was called."""
+    """A fake model client that returns canned replies and records each call."""
 
     def __init__(self, *replies: str) -> None:
+        """Store the replies to hand back, in order."""
         self.replies = list(replies)
         self.calls: list[dict] = []
 
     def complete(self, **kwargs):
+        """Record the call and return the next canned reply."""
         self.calls.append(kwargs)
         if not self.replies:
             raise AssertionError("FakeClient was called more times than it had replies")
-        return FakeResponse(self.replies.pop(0))
+        return SimpleNamespace(text=self.replies.pop(0))
 
 
 def test_extract_json_block_survives_fences_and_prose():
-    """Real replies arrive wrapped in chatter; the parser has to cope."""
+    """Checks that JSON is found inside code fences and surrounding chatter."""
     messy = (
         "Sure! Here is the record you asked for:\n\n"
         "```json\n"
@@ -69,13 +60,13 @@ def test_extract_json_block_survives_fences_and_prose():
 
 
 def test_extract_json_block_flags_truncation():
-    """An unterminated object means max_tokens, not a bad prompt -- say so."""
+    """Checks that an unfinished JSON object is reported as a max_tokens problem."""
     with pytest.raises(ExtractionError, match="max_tokens"):
         extract_json_block('{"issue_number": 1, "title": "half a repl')
 
 
 def test_schema_block_contains_every_field():
-    """The prompt's schema is generated, so it cannot drift from the model."""
+    """Checks that the prompt's schema lists every field and category value."""
     schema = schema_block(IssueSummary)
     for field_name in IssueSummary.model_fields:
         assert field_name in schema
@@ -85,6 +76,7 @@ def test_schema_block_contains_every_field():
 
 
 def test_valid_payload_validates_and_extra_fields_are_rejected():
+    """Checks that a good record validates and an unknown field is rejected."""
     summary = IssueSummary.model_validate(VALID_PAYLOAD)
     assert summary.issue_number == 4212
     assert summary.category.value == "bug"
@@ -95,7 +87,7 @@ def test_valid_payload_validates_and_extra_fields_are_rejected():
 
 
 def test_retry_feeds_the_validation_error_back_to_the_model():
-    """The core behaviour of phase 1: correct, don't just re-ask."""
+    """Checks that the retry sends back the bad reply plus the validation error."""
     broken = dict(VALID_PAYLOAD, confidence=4.2)  # out of the 0-1 range
     client = FakeClient(json.dumps(broken), json.dumps(VALID_PAYLOAD))
 
@@ -115,7 +107,7 @@ def test_retry_feeds_the_validation_error_back_to_the_model():
 
 
 def test_empty_reply_is_retried_without_being_replayed():
-    """An empty assistant turn is a 400 on OpenAI-style APIs; never send one."""
+    """Checks that an empty reply is retried without sending an empty assistant turn."""
     client = FakeClient("", json.dumps(VALID_PAYLOAD))
 
     summary = extract(client, IssueSummary, "irrelevant thread text")
@@ -126,7 +118,7 @@ def test_empty_reply_is_retried_without_being_replayed():
 
 
 def test_gives_up_after_max_attempts():
-    """Bounded, and the failure carries the evidence needed to debug it."""
+    """Checks that extraction stops after max_attempts and keeps every raw reply."""
     client = FakeClient("not json at all", "still not json", "nope")
 
     with pytest.raises(ExtractionError) as excinfo:
@@ -137,7 +129,7 @@ def test_gives_up_after_max_attempts():
 
 
 def test_parsed_output_always_uses_temperature_zero():
-    """A design decision worth a test: sampling variety is a defect here."""
+    """Checks that extraction always asks for temperature 0."""
     client = FakeClient(json.dumps(VALID_PAYLOAD))
     extract(client, IssueSummary, "irrelevant thread text")
     assert client.calls[0]["temperature"] == EXTRACTION_TEMPERATURE == 0.0

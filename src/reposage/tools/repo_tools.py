@@ -1,12 +1,11 @@
-"""get_file and search_code, reading a local checkout.
+"""The get_file and search_code tools, which read a local clone of the repository.
 
-Both tools are built by a factory that closes over the clone root, so the root
-is fixed at construction and cannot be supplied by the model. That is the first
-half of the security story; `_resolve_within` is the second.
+The clone root is fixed when the tools are built, so the model can never choose it.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -15,8 +14,7 @@ from pydantic import BaseModel, Field
 
 from .registry import Tool
 
-# Directories that are never worth searching, and would dominate the results if
-# they were. Checked by name at every level rather than by path prefix.
+# Folders never worth searching, skipped by name at any depth.
 SKIP_DIRECTORIES = {
     ".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build",
@@ -28,22 +26,12 @@ DEFAULT_FILE_LINE_CAP = 200
 
 
 class PathEscapeError(ValueError):
-    """The requested path resolves outside the repository."""
+    """Raised when a requested path points outside the repository."""
 
 
 def _resolve_within(root: Path, candidate: str) -> Path:
-    """Resolve `candidate` under `root`, refusing anything that escapes.
-
-    This is not paranoia. The path comes from a language model, and from phase
-    4 that model will have been reading repository content -- issue text,
-    README files, code comments -- any of which can contain instructions aimed
-    at it. `get_file("../../../.ssh/id_rsa")` is one sentence away at all times.
-
-    `resolve()` before the check, not after: it collapses `..` segments *and*
-    follows symlinks, so a symlink pointing out of the tree is caught too. A
-    check performed on the unresolved string would pass and then read the wrong
-    file.
-    """
+    """Return the full path of `candidate` inside `root`; raise PathEscapeError if it escapes."""
+    # Resolve first: it collapses ".." and follows symlinks, so both escapes get caught.
     root = root.resolve()
     target = (root / candidate).resolve()
     if target != root and root not in target.parents:
@@ -55,18 +43,23 @@ def _resolve_within(root: Path, candidate: str) -> Path:
 
 
 def _number_lines(lines: list[str], first_line_number: int) -> str:
-    """Prefix each line with its number.
-
-    Citations are the entire promise of this project, and a citation needs a
-    line number. If the model only ever sees bare source text, the best it can
-    do is quote -- and a quote is not a reference. Numbering here is what makes
-    "routing.py:412" possible at all.
-    """
+    """Prefix each line with its line number, so the model can cite "file:line"."""
     width = len(str(first_line_number + len(lines) - 1))
     return "\n".join(
         f"{first_line_number + offset:>{width}}: {line}"
         for offset, line in enumerate(lines)
     )
+
+
+def _files_to_search(root: Path) -> list[Path]:
+    """List every file under `root` in sorted order, never entering skipped folders."""
+    found: list[Path] = []
+    for folder, dirnames, filenames in os.walk(root):
+        # Assigning to dirnames[:] stops os.walk from entering skipped folders.
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRECTORIES]
+        # Files are checked by name too (a submodule's `.git` is a file).
+        found.extend(Path(folder, name) for name in filenames if name not in SKIP_DIRECTORIES)
+    return sorted(found)
 
 
 class GetFileParams(BaseModel):
@@ -96,36 +89,32 @@ class SearchCodeParams(BaseModel):
 
 
 def build_repo_tools(root: Path, line_cap: int = DEFAULT_FILE_LINE_CAP) -> list[Tool]:
+    """Return the get_file and search_code tools for the clone at `root`."""
     root = Path(root).resolve()
 
     def get_file(params: GetFileParams) -> str:
+        """Return a file's lines with numbers; without a range, only the first `line_cap` lines."""
         target = _resolve_within(root, params.path)
         if not target.is_file():
-            # Phrased as a hint, not just a refusal: this string goes back to
-            # the model, and its next move should be a better path.
+            # A hint, not just a refusal: the model's next move should be a better path.
             return (
                 f"No file at {params.path!r}. Use search_code to locate it, or "
                 f"check the path is relative to the repository root."
             )
 
-        text = target.read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines()
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(lines)
 
         start = params.start_line or 1
-        end = params.end_line or total
         if start > total:
             return f"{params.path} has {total} lines; start_line {start} is past the end."
-        end = min(end, total)
+        end = min(params.end_line or total, total)
         if end < start:
             return f"end_line ({end}) is before start_line ({start})."
 
-        window = lines[start - 1 : end]
         truncated = ""
-        # A whole large file is rarely what is wanted and always expensive --
-        # it is paid for again on every later turn, since history is resent.
+        # A whole large file is expensive, and it is paid for again on every later turn.
         if params.start_line is None and params.end_line is None and total > line_cap:
-            window = window[:line_cap]
             end = line_cap
             truncated = (
                 f"\n\n[showing lines 1-{line_cap} of {total}. Request a range "
@@ -133,9 +122,10 @@ def build_repo_tools(root: Path, line_cap: int = DEFAULT_FILE_LINE_CAP) -> list[
             )
 
         header = f"{params.path} (lines {start}-{end} of {total})\n"
-        return header + _number_lines(window, start) + truncated
+        return header + _number_lines(lines[start - 1 : end], start) + truncated
 
     def search_code(params: SearchCodeParams) -> str:
+        """Return lines matching a regex, as "path:line: text", with a count of all matches."""
         try:
             flags = re.IGNORECASE if params.ignore_case else 0
             expression = re.compile(params.pattern, flags)
@@ -145,10 +135,9 @@ def build_repo_tools(root: Path, line_cap: int = DEFAULT_FILE_LINE_CAP) -> list[
         matches: list[str] = []
         total_found = 0
 
-        for path in sorted(root.rglob("*")):
+        for path in _files_to_search(root):
+            # Also skips FIFOs and broken symlinks, which os.walk lists as files.
             if not path.is_file():
-                continue
-            if any(part in SKIP_DIRECTORIES for part in path.relative_to(root).parts):
                 continue
             if params.glob and not path.match(params.glob):
                 continue
@@ -158,18 +147,17 @@ def build_repo_tools(root: Path, line_cap: int = DEFAULT_FILE_LINE_CAP) -> list[
                 raw = path.read_bytes()
             except OSError:
                 continue
-            # A NUL byte in the first block is the standard cheap test for
-            # "binary", and avoids decoding megabytes of images.
+            # A NUL byte near the start means a binary file; skip it.
             if b"\x00" in raw[:1024]:
                 continue
 
-            relative = path.relative_to(root).as_posix()
             for number, line in enumerate(
                 raw.decode("utf-8", errors="replace").splitlines(), start=1
             ):
                 if expression.search(line):
                     total_found += 1
                     if len(matches) < params.max_results:
+                        relative = path.relative_to(root).as_posix()
                         matches.append(f"{relative}:{number}: {line.strip()[:200]}")
 
         if not matches:
@@ -179,9 +167,7 @@ def build_repo_tools(root: Path, line_cap: int = DEFAULT_FILE_LINE_CAP) -> list[
                 + ". Try a broader pattern or drop the glob."
             )
 
-        # Telling the model it is seeing a subset is the difference between it
-        # narrowing the search and it answering confidently from a fraction of
-        # the evidence.
+        # Say when this is a subset, so the model narrows the search instead of guessing.
         header = (
             f"{total_found} match(es); showing {len(matches)}.\n"
             if total_found > len(matches)

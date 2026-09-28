@@ -1,12 +1,4 @@
-"""list_issues — the one tool that is not backed by the local clone.
-
-Issues do not live in the repository, so this one stays on the GitHub API. It
-earns its place less for grounding than for shape: it gives the agent a source
-with different characteristics from the code tools -- slower, rate-limited,
-and answering "has anyone hit this before?" rather than "what does this do?".
-Watching a model choose between differently-shaped sources is most of what
-phase 5's tool-selection metric measures.
-"""
+"""The list_issues tool: reads issues from the GitHub API (issues are not in the clone)."""
 
 from __future__ import annotations
 
@@ -33,7 +25,8 @@ class ListIssuesParams(BaseModel):
     limit: int = Field(default=5, ge=1, le=20, description="Maximum issues to return.")
 
 
-def _headers() -> dict[str, str]:
+def github_headers() -> dict[str, str]:
+    """GitHub API headers, with GITHUB_TOKEN if set (raises the limit from 60 to 5000 requests/hour)."""
     headers = {"Accept": "application/vnd.github+json"}
     token = os.getenv("GITHUB_TOKEN")
     if token:
@@ -42,8 +35,11 @@ def _headers() -> dict[str, str]:
 
 
 def build_github_tools(repo: str) -> list[Tool]:
+    """Return the list_issues tool for one repository."""
+
     def list_issues(params: ListIssuesParams) -> str:
-        with httpx.Client(timeout=20.0, headers=_headers()) as http:
+        """List issues, most-commented first, optionally filtered by title."""
+        with httpx.Client(timeout=20.0, headers=github_headers()) as http:
             response = http.get(
                 f"{GITHUB_API}/repos/{repo}/issues",
                 params={
@@ -54,17 +50,13 @@ def build_github_tools(repo: str) -> list[Tool]:
                 },
             )
             if response.status_code == 403:
-                # Worth its own branch: a rate limit is a "wait and retry"
-                # condition, not "no such data", and the model should be told
-                # which it is rather than concluding the repo has no issues.
+                # Tell the model it hit a rate limit, so it doesn't conclude there are no issues.
                 return (
                     "GitHub rate limit reached. Set GITHUB_TOKEN to raise the "
                     "limit from 60 to 5000 requests/hour, or try again later."
                 )
             response.raise_for_status()
-            # The issues endpoint returns pull requests too — they carry a
-            # `pull_request` key. A PR thread is a code review, not a question
-            # with an answer, so it is the wrong shape for this tool.
+            # The issues endpoint also returns pull requests; drop them.
             issues = [item for item in response.json() if "pull_request" not in item]
 
         if params.query:
