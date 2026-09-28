@@ -273,6 +273,12 @@ def extract(
             if attempt == max_attempts:
                 break
 
+            # An empty reply leaves nothing to correct, and replaying it is a
+            # 400 on OpenAI-style APIs (an assistant turn needs content). Ask
+            # again as-is instead.
+            if not raw.strip():
+                continue
+
             # The two turns below are the whole trick. The assistant turn is
             # the model's own broken reply -- without it the model has no idea
             # what it is being asked to correct, because the API kept no memory

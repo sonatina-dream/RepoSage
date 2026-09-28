@@ -25,6 +25,14 @@ each costs money or correctness if ignored:
   simply be absent, which surfaces later as a run that appears to have cost
   nothing.
 
+Thinking is on by default for the V4 models, and the hidden reasoning is
+billed against `max_tokens` before any answer text appears. A 250-token budget
+can be spent entirely on reasoning, leaving an empty reply with finish reason
+"length". It is switched off here so that `max_tokens` means answer tokens, as
+it does on Anthropic by default. Turning it back on is a deliberate choice,
+not a default: with tools offered, DeepSeek then requires every earlier turn's
+`reasoning_content` to be sent back, which this module does not yet do.
+
 And one outright defect, which is why `_check_contract` exists: the model
 intermittently serialises a tool call into `content` as plain text and reports
 the finish reason as "stop", so a caller trusting either signal alone silently
@@ -52,6 +60,9 @@ from .base import (
 )
 
 BASE_URL = "https://api.deepseek.com"
+
+# Sent on every request. See the module docstring.
+THINKING_DISABLED = {"thinking": {"type": "disabled"}}
 
 _FINISH_REASONS = {
     "stop": STOP_END_TURN,
@@ -255,6 +266,7 @@ class DeepSeekProvider:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": self._to_wire(messages, system),
+            "extra_body": THINKING_DISABLED,
         }
         if tools:
             kwargs["tools"] = self._tools(tools)
@@ -295,6 +307,7 @@ class DeepSeekProvider:
             temperature=temperature,
             messages=self._to_wire(messages, system),
             stream=True,
+            extra_body=THINKING_DISABLED,
             # Without this the usage totals may never arrive and the run looks
             # free. See the module docstring.
             stream_options={"include_usage": True},

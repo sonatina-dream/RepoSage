@@ -114,6 +114,17 @@ def test_retry_feeds_the_validation_error_back_to_the_model():
     assert "less than or equal to 1" in second_turn[2]["content"]
 
 
+def test_empty_reply_is_retried_without_being_replayed():
+    """An empty assistant turn is a 400 on OpenAI-style APIs; never send one."""
+    client = FakeClient("", json.dumps(VALID_PAYLOAD))
+
+    summary = extract(client, IssueSummary, "irrelevant thread text")
+
+    assert summary.issue_number == 4212
+    assert len(client.calls) == 2
+    assert [m["role"] for m in client.calls[1]["messages"]] == ["user"]
+
+
 def test_gives_up_after_max_attempts():
     """Bounded, and the failure carries the evidence needed to debug it."""
     client = FakeClient("not json at all", "still not json", "nope")
