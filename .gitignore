@@ -26,3 +26,6 @@ data/issues/*.json
 # Local clones the code tools read from — regenerable with one git clone.
 data/repos/
 .opencode
+
+# Agent run traces (one JSONL file per run) -- regenerable, and may hold repo text.
+data/traces/

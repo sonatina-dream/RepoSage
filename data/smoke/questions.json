@@ -1,0 +1,12 @@
+[
+  {"id": "q01", "question": "Where is solve_dependencies defined, and how does it use dependency_overrides_provider?", "must_cite": ["fastapi/dependencies/utils.py"]},
+  {"id": "q02", "question": "Which class implements the OAuth2 password bearer security scheme?", "must_cite": ["fastapi/security/oauth2.py"]},
+  {"id": "q03", "question": "How does FastAPI turn a request validation error into a 422 response? Name the handler.", "must_cite": ["fastapi/exception_handlers.py"]},
+  {"id": "q04", "question": "Where is jsonable_encoder defined?", "must_cite": ["fastapi/encoders.py"]},
+  {"id": "q05", "question": "Which class implements HTTP Bearer token authentication?", "must_cite": ["fastapi/security/http.py"]},
+  {"id": "q06", "question": "Where is the APIKeyHeader security class defined?", "must_cite": ["fastapi/security/api_key.py"]},
+  {"id": "q07", "question": "Which function builds the OpenAPI schema dictionary for an application?", "must_cite": ["fastapi/openapi/utils.py"]},
+  {"id": "q08", "question": "Where does FastAPI generate the HTML page for Swagger UI?", "must_cite": ["fastapi/openapi/docs.py"]},
+  {"id": "q09", "question": "How does the FastAPI application object expose dependency overrides for tests?", "must_cite": ["fastapi/applications.py"]},
+  {"id": "q10", "question": "Where is the BackgroundTasks class defined, and what does it extend?", "must_cite": ["fastapi/background.py"]}
+]
