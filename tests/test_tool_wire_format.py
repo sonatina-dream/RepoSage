@@ -195,3 +195,16 @@ def test_deepseek_requests_disable_thinking(call):
             next(provider.stream(**request))
 
     assert completions.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_anthropic_request_kwargs_match_the_sdk_signature():
+    """Checks that every request field is accepted by the installed SDK's create() and stream()."""
+    import inspect
+
+    from anthropic.resources.messages import Messages
+
+    provider = AnthropicProvider.__new__(AnthropicProvider)
+    kwargs = provider._kwargs("m", [], "sys", 10, 0.0)
+    assert kwargs["extra_body"] == {"temperature": 0.0}
+    for method in (Messages.create, Messages.stream):
+        inspect.signature(method).bind(None, **kwargs)
