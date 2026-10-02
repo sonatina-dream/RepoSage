@@ -121,8 +121,10 @@ class AnthropicProvider:
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "temperature": temperature,
             "messages": self._to_wire(messages),
+            # Newer SDKs dropped `temperature` from their signatures; the API still
+            # accepts it, so send it in the request body instead.
+            "extra_body": {"temperature": temperature},
         }
         # Anthropic takes the system prompt as a top-level parameter, not a message.
         if system:
