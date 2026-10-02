@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Type
+from typing import Any, Callable, Literal, Type
 
 from pydantic import BaseModel, ValidationError
 
@@ -16,6 +16,10 @@ from ..providers import ToolCall, ToolResult
 
 # About 2,000 tokens: room for a good chunk of a file, but capped.
 DEFAULT_MAX_RESULT_CHARS = 8_000
+
+
+# "safe" tools only read; "risky" tools change something and need approval before the agent runs them.
+RiskLevel = Literal["safe", "risky"]
 
 
 @dataclass
@@ -26,6 +30,7 @@ class Tool:
     description: str
     params: Type[BaseModel]
     handler: Callable[[Any], str]
+    risk: RiskLevel = "safe"
 
     def specification(self) -> dict[str, Any]:
         """Return the tool's spec (name, description, argument schema) for providers to send."""
@@ -73,6 +78,10 @@ class ToolRegistry:
     def names(self) -> list[str]:
         """Names of the registered tools."""
         return list(self._tools)
+
+    def get(self, name: str) -> Tool | None:
+        """Return the tool with this name, or None."""
+        return self._tools.get(name)
 
     def __contains__(self, name: object) -> bool:
         """True if a tool with this name is registered."""

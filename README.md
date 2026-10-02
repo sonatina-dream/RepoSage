@@ -57,8 +57,8 @@ answers anyway, slightly worse, with no error to tell you why.
 | 0 | API fundamentals: messages, tokens, cost, temperature, streaming, statelessness | Done |
 | 1 | Structured output: JSON schema, Pydantic validation, retry on validation error | Done |
 | 2 | Tool calling: schemas, the tool-call → execute → result round trip, a registry | Done |
-| 3 | Agent harness, the core loop: stop conditions, iteration cap, tool errors, tracing, streaming events, human approval of risky actions, and a 10-question smoke eval | Next |
-| 3b | Context engineering and memory: token budget, compacting long histories, short- vs long-term memory, subagents | Planned |
+| 3 | Agent harness, the core loop: stop conditions, iteration cap, tool errors, tracing, streaming events, human approval of risky actions, and a 10-question smoke eval | Done |
+| 3b | Context engineering and memory: token budget, compacting long histories, short- vs long-term memory, subagents | Next |
 | 4 | RAG: structure-aware chunking, embeddings, hybrid retrieval, reranking, citations | Planned |
 | 5 | Evaluation: ground-truth set from closed issues, retrieval and groundedness metrics, LLM-as-judge, CI gate | Planned |
 | 6 | LangGraph: state graphs, tool nodes, checkpointers, interrupts, multi-agent patterns; hand-written vs framework on the same evals | Planned |
@@ -80,11 +80,14 @@ pip install -r requirements.txt
 cp .env.example .env               # add DEEPSEEK_API_KEY (or ANTHROPIC_API_KEY)
 
 python scripts/check_provider.py   # ~$0.00001 — run this first
-pytest -q                          # 53 tests, no API key needed
+pytest -q                          # 71 tests, no API key needed
 
 python phases/phase00_first_call.py --all
 python phases/phase01_structured_output.py --repo fastapi/fastapi --limit 5
 python phases/phase02_tool_calling.py --show-schemas
+
+PYTHONPATH=src python -m reposage ask "Where is BackgroundTasks defined?"
+python scripts/smoke_eval.py --provider deepseek   # 10 questions, ~$0.01
 ```
 
 `phase02` shallow-clones the target repository into `data/repos/` on first run.
@@ -94,7 +97,8 @@ If `python3` is missing or older than 3.11, install it with
 
 Prefer a browser to terminal output? `streamlit run app/playground.py` opens a
 playground with a tab per phase: streaming chat, extraction with its retry
-attempts, and the tool-calling round trip step by step, plus live spend.
+attempts, the tool-calling round trip step by step, and the phase 3 agent loop
+with its live event stream and trace, plus live spend.
 
 Both phase scripts take `--provider` if you want to run one against the other
 vendor without editing `.env`.
@@ -111,11 +115,16 @@ src/reposage/tools/registry.py        schema-from-handler, dispatch, errors-as-r
 src/reposage/tools/repo_tools.py      get_file, search_code — path-confined, line-numbered
 src/reposage/tools/github_tools.py    list_issues
 src/reposage/repo.py                  the shallow clone the code tools read
+src/reposage/agent.py                 the loop: stop conditions, loop guard, approval, grounding prompt
+src/reposage/events.py                typed event stream (step_started ... final) and exit reasons
+src/reposage/tracing.py               one JSONL record per step under data/traces/
+src/reposage/__main__.py              `python -m reposage ask "..."`
+scripts/smoke_eval.py                 10 hand-written questions (data/smoke/questions.json)
 phases/phase00_*.py                   five runnable demos of the API fundamentals
 phases/phase01_*.py                   mines closed GitHub issues into validated records
 phases/phase02_*.py                   one tool-calling round trip, every message printed
-app/playground.py                     Streamlit UI over phases 0-2 (learning aid, not the phase 8 UI)
-tests/                                53 deterministic tests, scripted fakes, no API key
+app/playground.py                     Streamlit UI over phases 0-3 (learning aid, not the phase 8 UI)
+tests/                                71 deterministic tests, scripted fakes, no API key
 data/issues/                          extracted eval candidates (regenerable, gitignored)
 ```
 
@@ -231,3 +240,41 @@ not need a vector search, and a pipeline cannot decline to run.
 asked and a maintainer answered, which is free ground truth. The extracted
 records are candidates only — phase 5 will not use a model's own summary as the
 yardstick for that model without a human pass over it first.
+
+## Phase 3 results: the agent loop
+
+Baseline smoke score (10 questions about `fastapi/fastapi`, one file each that the
+answer must cite as `path:line`; fast model of each provider; 2026-10-03):
+
+| Provider / model | Score | Cost per question | Typical steps |
+|---|---|---|---|
+| DeepSeek `deepseek-v4-flash` | 10/10 | $0.0009 | 3 |
+| Anthropic `claude-haiku-4-5` | 10/10 | $0.0131 | 2-6 |
+
+Haiku scored 6/10 on the first run, and every miss was a *correct* answer cited as
+"`fastapi/encoders.py` at line 129" instead of `fastapi/encoders.py:129`. The
+fix was one sentence in the system prompt that forbids that phrasing; the scorer
+stayed strict. Worth remembering for phase 5: a format miss and a wrong answer look
+the same in a pass rate, so the eval has to tell them apart.
+
+**Every run ends with exactly one recorded reason**: `final_answer`,
+`iteration_cap`, `budget_exceeded`, `output_truncated` or `transport_error`. A
+loop that can only exit one way will eventually run forever.
+
+**Two kinds of failure, two kinds of handling.** Transport failures (network,
+rate limits) are retried inside `LLMClient`; if they persist the run ends. Tool
+and contract failures (bad arguments, unknown tool, a denied approval, a repeated
+call) go back to the model as error results, because it can often fix them.
+
+**The loop guard blocks, not just warns.** An identical call (same tool, same
+arguments) is not run again; the model gets an error saying it already has that
+result. Re-running would burn a step and re-send the same text for nothing.
+
+**Risky tools need approval, and the default is no.** Tools carry a `risk` level;
+a risky call goes to an approval callback, and with no callback it is denied. No
+current tool is risky (all three only read); the mechanism exists so that adding a
+write tool cannot silently bypass a human.
+
+**`text_delta` is per step for now.** Streaming is not wired through tool-using
+calls, so the event carries the step's whole text. The event type is what phase 8
+will consume; token-level streaming can replace it without changing consumers.

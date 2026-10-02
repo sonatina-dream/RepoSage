@@ -1,10 +1,11 @@
-"""RepoSage playground -- a browser UI for trying what phases 0 to 2 built.
+"""RepoSage playground -- a browser UI for trying what phases 0 to 3 built.
 
     streamlit run app/playground.py
 
-Three tabs: a streaming chat (phase 0), structured extraction with its retry
-attempts (phase 1), and a tool-calling round trip, step by step (phase 2). The
-sidebar shows spend against the ceiling. This is a learning aid, not the
+Four tabs: a streaming chat (phase 0), structured extraction with its retry
+attempts (phase 1), a tool-calling round trip, step by step (phase 2), and the
+full agent loop with its live event stream and trace (phase 3). The sidebar
+shows spend against the ceiling. This is a learning aid, not the
 production UI planned for phase 8.
 """
 
@@ -18,11 +19,16 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from reposage.agent import Agent  # noqa: E402
 from reposage.config import Settings, format_usd  # noqa: E402
+from reposage.events import (  # noqa: E402
+    Final, StepStarted, TextDelta, ToolCallEvent, ToolResultEvent,
+)
 from reposage.extraction import ExtractionError, IssueSummary, extract  # noqa: E402
 from reposage.llm import BudgetExceeded, LLMClient  # noqa: E402
 from reposage.repo import DEFAULT_REPO  # noqa: E402
 from reposage.tools import build_default_registry, results_to_messages  # noqa: E402
+from reposage.tracing import TraceWriter, new_trace_path, read_trace  # noqa: E402
 
 TOOL_SYSTEM_PROMPT = (
     "You answer questions about a source code repository. Use the tools to read it "
@@ -64,8 +70,13 @@ with st.sidebar:
         f"{client.usage.summary()}\n\nBudget left: {format_usd(client.remaining_budget_usd)}"
     )
 
-chat_tab, extract_tab, tools_tab = st.tabs(
-    ["💬 Chat (phase 0)", "🧾 Extraction (phase 1)", "🛠️ Tool calling (phase 2)"]
+chat_tab, extract_tab, tools_tab, agent_tab = st.tabs(
+    [
+        "💬 Chat (phase 0)",
+        "🧾 Extraction (phase 1)",
+        "🛠️ Tool calling (phase 2)",
+        "🤖 Agent (phase 3)",
+    ]
 )
 
 # -- phase 0: chat ---------------------------------------------------------
@@ -187,3 +198,71 @@ with tools_tab:
             st.json(build_default_registry(repo)[0].specifications())
         except Exception as exc:
             st.warning(str(exc))
+
+# -- phase 3: the agent loop -----------------------------------------------
+EXIT_LABELS = {
+    "final_answer": ("success", "Final answer"),
+    "iteration_cap": ("warning", "Stopped: iteration cap"),
+    "budget_exceeded": ("warning", "Stopped: budget exceeded"),
+    "output_truncated": ("warning", "Stopped: output truncated"),
+    "transport_error": ("error", "Stopped: provider kept failing"),
+}
+
+with agent_tab:
+    st.write(
+        "The same tools as phase 2, but now in a loop: the model keeps asking for "
+        "tools until it can answer. Every step is traced to `data/traces/`."
+    )
+    agent_repo = st.text_input("Repository", DEFAULT_REPO, key="agent_repo")
+    agent_question = st.text_area(
+        "Question",
+        "How does FastAPI turn a request validation error into a 422 response?",
+        key="agent_question",
+    )
+    col_a, col_b = st.columns(2)
+    max_iterations = col_a.number_input("Max iterations (model calls)", 1, 20, 8)
+    max_cost = col_b.number_input("Max cost for this run (USD)", 0.001, 1.0, 0.25, 0.01, format="%.3f")
+
+    if st.button("Run the agent", disabled=not agent_question.strip()):
+        try:
+            with st.spinner("Cloning (first run only)..."):
+                agent_registry, _ = build_default_registry(agent_repo)
+            tracer = TraceWriter(new_trace_path())
+            agent = Agent(
+                client, agent_registry, max_iterations=int(max_iterations),
+                max_cost_usd=float(max_cost), tracer=tracer, temperature=temperature,
+            )
+            step_box = None
+            final = None
+            for event in agent.stream(agent_question):
+                if isinstance(event, StepStarted):
+                    step_box = st.status(f"Step {event.step}: model is thinking...", expanded=True)
+                elif isinstance(event, TextDelta):
+                    step_box.write(event.text)
+                elif isinstance(event, ToolCallEvent):
+                    step_box.code(f"{event.name}({json.dumps(event.arguments)})", language="python")
+                elif isinstance(event, ToolResultEvent):
+                    icon = "🔁" if event.note == "repeat" else "⛔" if event.note == "denied" else (
+                        "❌" if event.is_error else "✅"
+                    )
+                    step_box.caption(
+                        f"{icon} {event.name} · {event.duration_s * 1000:.0f} ms"
+                        + (f" · {event.note}" if event.note else "")
+                    )
+                    step_box.code(event.content[:800])
+                    step_box.update(label=f"Step {event.step}: ran {event.name}")
+                elif isinstance(event, Final):
+                    final = event
+            kind, label = EXIT_LABELS[final.exit_reason]
+            getattr(st, kind)(label + (f" -- {final.detail}" if final.detail else ""))
+            st.subheader("Answer")
+            st.write(final.answer or "(no answer)")
+            st.caption(
+                f"{final.steps} step(s) · {final.input_tokens} in / {final.output_tokens} out · "
+                f"{format_usd(final.cost_usd)}"
+            )
+            with st.expander(f"Trace ({tracer.path.name}) -- one JSON record per step"):
+                for record in read_trace(tracer.path):
+                    st.json(record, expanded=False)
+        except Exception as exc:  # surface clone/network errors in the page, not a traceback
+            st.error(f"{type(exc).__name__}: {exc}")
