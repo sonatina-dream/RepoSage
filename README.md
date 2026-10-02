@@ -92,6 +92,10 @@ python phases/phase02_tool_calling.py --show-schemas
 If `python3` is missing or older than 3.11, install it with
 [Homebrew](https://brew.sh): `brew install python@3.12`.
 
+Prefer a browser to terminal output? `streamlit run app/playground.py` opens a
+playground with a tab per phase: streaming chat, extraction with its retry
+attempts, and the tool-calling round trip step by step, plus live spend.
+
 Both phase scripts take `--provider` if you want to run one against the other
 vendor without editing `.env`.
 
@@ -110,6 +114,7 @@ src/reposage/repo.py                  the shallow clone the code tools read
 phases/phase00_*.py                   five runnable demos of the API fundamentals
 phases/phase01_*.py                   mines closed GitHub issues into validated records
 phases/phase02_*.py                   one tool-calling round trip, every message printed
+app/playground.py                     Streamlit UI over phases 0-2 (learning aid, not the phase 8 UI)
 tests/                                53 deterministic tests, scripted fakes, no API key
 data/issues/                          extracted eval candidates (regenerable, gitignored)
 ```
