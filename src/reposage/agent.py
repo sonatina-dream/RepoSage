@@ -34,6 +34,7 @@ from .events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from .context import ContextBudget, estimate_context_tokens
 from .llm import BudgetExceeded, LLMClient
 from .providers import Message, ToolCall, ToolResult
 from .tools import ToolRegistry, results_to_messages
@@ -98,8 +99,10 @@ class Agent:
         approve: ApprovalCallback | None = None,
         tracer: TraceWriter | None = None,
         temperature: float | None = None,
+        context_budget: ContextBudget | None = None,
     ) -> None:
         """Set the limits. With no `approve` callback, risky tools are always denied."""
+        self.context_budget = context_budget or ContextBudget()
         self.client = client
         self.registry = registry
         self.system_prompt = system_prompt
@@ -168,6 +171,8 @@ class Agent:
                 "tools": self.registry.names,
                 "max_iterations": self.max_iterations,
                 "max_cost_usd": self.max_cost_usd,
+                "context_max_tokens": self.context_budget.max_tokens,
+                "context_threshold_tokens": self.context_budget.threshold_tokens,
             }
         )
 
@@ -189,13 +194,17 @@ class Agent:
             yield StepStarted(step=steps)
 
             # -- one model call ------------------------------------------
+            specifications = self.registry.specifications()
+            estimated_tokens = estimate_context_tokens(
+                history, self.system_prompt, specifications
+            )
             call_started = time.monotonic()
             before = self.client.usage.cost_usd
             try:
                 reply = self.client.complete(
                     messages=history,
                     system=self.system_prompt,
-                    tools=self.registry.specifications(),
+                    tools=specifications,
                     temperature=self.temperature,
                 )
             except BudgetExceeded as exc:
@@ -216,6 +225,10 @@ class Agent:
                 "step": steps,
                 "model": reply.model,
                 "latency_s": round(latency, 3),
+                "estimated_context_tokens": estimated_tokens,
+                "over_compaction_threshold": self.context_budget.should_compact(
+                    estimated_tokens
+                ),
                 "input_tokens": reply.input_tokens,
                 "cached_input_tokens": reply.cached_input_tokens,
                 "output_tokens": reply.output_tokens,

@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from reposage.agent import Agent  # noqa: E402
 from reposage.config import Settings, format_usd  # noqa: E402
+from reposage.context import ContextBudget  # noqa: E402
 from reposage.events import (  # noqa: E402
     Final, StepStarted, TextDelta, ToolCallEvent, ToolResultEvent,
 )
@@ -222,6 +223,9 @@ with agent_tab:
     col_a, col_b = st.columns(2)
     max_iterations = col_a.number_input("Max iterations (model calls)", 1, 20, 8)
     max_cost = col_b.number_input("Max cost for this run (USD)", 0.001, 1.0, 0.25, 0.01, format="%.3f")
+    col_c, col_d = st.columns(2)
+    context_max = col_c.number_input("Context budget (tokens)", 1000, 200_000, 30_000, 1000)
+    context_threshold = col_d.slider("Compaction threshold (fraction of budget)", 0.1, 1.0, 0.8, 0.05)
 
     if st.button("Run the agent", disabled=not agent_question.strip()):
         try:
@@ -231,6 +235,7 @@ with agent_tab:
             agent = Agent(
                 client, agent_registry, max_iterations=int(max_iterations),
                 max_cost_usd=float(max_cost), tracer=tracer, temperature=temperature,
+                context_budget=ContextBudget(int(context_max), float(context_threshold)),
             )
             step_box = None
             final = None
@@ -261,8 +266,24 @@ with agent_tab:
                 f"{final.steps} step(s) · {final.input_tokens} in / {final.output_tokens} out · "
                 f"{format_usd(final.cost_usd)}"
             )
+            records = read_trace(tracer.path)
+            steps = [r for r in records if r["type"] == "step"]
+            if steps:
+                st.subheader("Context size per step")
+                st.line_chart(
+                    {
+                        "estimated (before call)": [s["estimated_context_tokens"] for s in steps],
+                        "actual (provider)": [s["input_tokens"] for s in steps],
+                        "compaction threshold": [records[0]["context_threshold_tokens"]] * len(steps),
+                    }
+                )
+                crossed = [s["step"] for s in steps if s["over_compaction_threshold"]]
+                st.caption(
+                    f"Steps over the compaction threshold: {crossed}" if crossed
+                    else "No step crossed the compaction threshold."
+                )
             with st.expander(f"Trace ({tracer.path.name}) -- one JSON record per step"):
-                for record in read_trace(tracer.path):
+                for record in records:
                     st.json(record, expanded=False)
         except Exception as exc:  # surface clone/network errors in the page, not a traceback
             st.error(f"{type(exc).__name__}: {exc}")
